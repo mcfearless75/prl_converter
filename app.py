@@ -7,13 +7,12 @@ import re
 import unicodedata
 import matplotlib.pyplot as plt
 from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils.dataframe import dataframe_to_rows
 
-# Choose DB: Postgres on Render, else SQLite
+# ==== DB Connection: Use Postgres on Render, SQLite locally ====
 if "DATABASE_URL" in os.environ:
     import psycopg2
     from urllib.parse import urlparse
@@ -356,7 +355,10 @@ def extract_timesheet_data_pdf(file) -> list[dict]:
         }]
     return results
 
+# ====== Streamlit Tabs UI ======
 tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
+
+# ---- 1. Upload & Review ----
 with tabs[0]:
     st.sidebar.header("Upload Timesheets")
     st.sidebar.markdown(
@@ -535,6 +537,54 @@ with tabs[0]:
             help="Excel contains formulas for payroll calculations."
         )
 
-# For brevity, History, Dashboard, Settings tabs can be updated to match the same pattern:
-# Use the correct DB cursor, and remove fuzzy threshold from Settings.
+# ---- 2. History ----
+with tabs[1]:
+    st.header("🗃️ Timesheet Upload History")
+    st.markdown("Displays all timesheet entries stored in the database.")
+
+    # Choose correct DB fetch
+    if "DATABASE_URL" in os.environ:
+        c.execute("SELECT name, matched_as, ratio, client, site_address, department, weekday_hours, saturday_hours, sunday_hours, rate, date_range, extracted_on, source_file, upload_timestamp FROM timesheet_entries ORDER BY upload_timestamp DESC LIMIT 1000")
+    else:
+        c.execute("SELECT name, matched_as, ratio, client, site_address, department, weekday_hours, saturday_hours, sunday_hours, rate, date_range, extracted_on, source_file, upload_timestamp FROM timesheet_entries ORDER BY upload_timestamp DESC LIMIT 1000")
+
+    history_rows = c.fetchall()
+    history_df = pd.DataFrame(history_rows, columns=[
+        "Name", "Matched As", "Ratio", "Client", "Site Address", "Department",
+        "Weekday Hours", "Saturday Hours", "Sunday Hours", "Rate (£)",
+        "Date Range", "Extracted On", "Source File", "Upload Timestamp"
+    ])
+    st.dataframe(history_df, use_container_width=True)
+
+# ---- 3. Dashboard ----
+with tabs[2]:
+    st.header("📊 Dashboard")
+    st.markdown("Aggregate stats for all stored timesheets.")
+
+    # Simple summary chart
+    if "DATABASE_URL" in os.environ:
+        c.execute("SELECT matched_as, SUM(weekday_hours), SUM(saturday_hours), SUM(sunday_hours), SUM(rate * weekday_hours) as total_pay FROM timesheet_entries GROUP BY matched_as")
+    else:
+        c.execute("SELECT matched_as, SUM(weekday_hours), SUM(saturday_hours), SUM(sunday_hours), SUM(rate * weekday_hours) as total_pay FROM timesheet_entries GROUP BY matched_as")
+
+    dashboard_rows = c.fetchall()
+    dashboard_df = pd.DataFrame(dashboard_rows, columns=[
+        "Name", "Weekday Hours", "Saturday Hours", "Sunday Hours", "Total Pay"
+    ])
+
+    if not dashboard_df.empty:
+        st.bar_chart(dashboard_df.set_index("Name")[["Weekday Hours", "Saturday Hours", "Sunday Hours"]])
+        st.markdown(f"**Total Pay (approx):** £{dashboard_df['Total Pay'].sum():,.2f}")
+    else:
+        st.info("No data available yet.")
+
+# ---- 4. Settings ----
+with tabs[3]:
+    st.header("⚙️ Settings & Info")
+    st.markdown("""
+    - Click **Reload Pay Rates** in the sidebar to update rates from your Excel.
+    - Only exact matches (case and accent-insensitive) are used for rates.
+    - Any unmatched name uses the default rate (£15/hr) and is highlighted in red.
+    - For support or feature requests, contact your dev team!
+    """)
 
