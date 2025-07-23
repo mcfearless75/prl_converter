@@ -1,4 +1,7 @@
 import os
+import io
+import zipfile
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 import docx
@@ -8,7 +11,6 @@ import unicodedata
 import matplotlib.pyplot as plt
 from io import BytesIO
 from datetime import datetime
-from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 
@@ -156,28 +158,70 @@ def calculate_pay(name: str, daily_data: list[dict]):
     total_pay = pay_regular + pay_overtime + pay_sat + pay_sun
     return weekday_hours, sat_hours, sun_hours, rate, total_pay, matched_raw, ratio
 
-def extract_timesheet_data(file) -> dict:
-    # ... existing docx logic ...
-    pass  # omitted for brevity
+def extract_timesheet_data(file) -> list[dict]:
+    # ... your existing DOCX parsing logic here ...
+    pass
 
 def extract_timesheet_data_pdf(file) -> list[dict]:
-    # ... existing PDF logic ...
-    pass  # omitted for brevity
+    # ... your existing PDF parsing logic here ...
+    pass
 
 # ====== Streamlit Tabs UI ======
 tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
 
 # ---- 1. Upload & Review ----
 with tabs[0]:
-    # ... your existing upload & review code ...
-    pass  # omitted for brevity
+    st.header("📥 Bulk‑Upload via ZIP")
+    st.markdown("Upload a ZIP containing folders of `.pdf` and `.docx` timesheets.")
+
+    uploaded_zip = st.file_uploader(
+        "📦 Select your ZIP file",
+        type=["zip"],
+        accept_multiple_files=False
+    )
+
+    if uploaded_zip:
+        try:
+            zip_bytes = io.BytesIO(uploaded_zip.read())
+            z = zipfile.ZipFile(zip_bytes)
+        except zipfile.BadZipFile:
+            st.error("That doesn’t look like a valid ZIP. Try re‑zipping and uploading again.")
+        else:
+            processed = 0
+            for member in z.namelist():
+                if member.lower().endswith((".pdf", ".docx")):
+                    # read each file into BytesIO so your extractors can handle it
+                    content = z.read(member)
+                    file_obj = BytesIO(content)
+                    file_obj.name = Path(member).name
+
+                    # choose extractor
+                    if member.lower().endswith(".pdf"):
+                        records = extract_timesheet_data_pdf(file_obj)
+                    else:
+                        records = extract_timesheet_data(file_obj)
+
+                    # --- your existing processing logic goes here ---
+                    # e.g., loop over `records`, calculate pay,
+                    # insert rows into DB, show a preview, etc.
+                    #
+                    # for rec in records:
+                    #     weekday, sat, sun, rate, total, matched, ratio = calculate_pay(rec["name"], rec["daily"])
+                    #     # insert into DB...
+                    #     c.execute( ... )
+                    # conn.commit()
+                    #
+                    processed += 1
+
+            st.success(f"Processed {processed} files from the ZIP!")
+    else:
+        st.info("Upload a ZIP above to start processing timesheets.")
 
 # ---- 2. History ----
 with tabs[1]:
     st.header("🗃️ Timesheet Upload History")
     st.markdown("Displays all timesheet entries stored in the database.")
 
-    # Pull the last 1000 entries
     query = (
         "SELECT name, matched_as, ratio, client, site_address, department, "
         "weekday_hours, saturday_hours, sunday_hours, rate, date_range, "
@@ -196,7 +240,6 @@ with tabs[1]:
         ]
     )
 
-    # Convert to real datetime and compute week buckets
     history_df["Upload Timestamp"] = pd.to_datetime(history_df["Upload Timestamp"])
     history_df["week_start"] = (
         history_df["Upload Timestamp"]
@@ -204,7 +247,6 @@ with tabs[1]:
         .apply(lambda r: r.start_time.date())
     )
 
-    # Show each week in an expander
     for week, wk_df in history_df.groupby("week_start"):
         with st.expander(f"Week of {week.strftime('%Y-%m-%d')} ({len(wk_df)} entries)"):
             st.dataframe(
@@ -223,8 +265,8 @@ with tabs[2]:
 with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - Click **Reload Pay Rates** in the sidebar to update rates from your Excel.
-    - Only exact matches (case and accent-insensitive) are used for rates.
-    - Any unmatched name uses the default rate (£15/hr) and is highlighted in red.
-    - For support or feature requests, contact your dev team!
+    - ZIP upload will recurse through folders and pick up any `.pdf` or `.docx`.
+    - Click **Reload Pay Rates** in the sidebar to refresh from Excel.
+    - Only exact matches (case & accent‑insensitive) pull custom rates.
+    - Unmatched names default to £15/hr and get highlighted for review.
     """)
