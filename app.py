@@ -14,12 +14,12 @@ from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 
-# ==== CONFIG & DB Connection ====
+# ==== CONFIG & PAGE SETUP ====
 st.set_page_config(page_title="PRL Timesheet Portal", page_icon="📑", layout="wide")
 RATE_FILE_PATH = "pay details.xlsx"
 DEFAULT_RATE = 15.0
 
-# Sidebar: Excel uploader for pay rates
+# ==== SIDEBAR: PAY‑RATES EXCEL UPLOADER ====
 st.sidebar.title("⚙️ PRL Timesheet Converter")
 excel_uploader = st.sidebar.file_uploader(
     "📥 Upload Pay‑Rates Excel",
@@ -33,7 +33,7 @@ if excel_uploader:
     st.cache_data.clear()
     st.rerun()
 
-# DB setup
+# ==== DATABASE CONNECTION ====
 if "DATABASE_URL" in os.environ:
     import psycopg2
     from urllib.parse import urlparse
@@ -69,7 +69,7 @@ else:
     """)
 conn.commit()
 
-# ==== Rate‐lookup helpers ====
+# ==== UTILITIES: NAME NORMALIZATION & RATE LOADING ====
 def normalize_name(s: str) -> str:
     s = s.lower().strip()
     s = unicodedata.normalize("NFD", s)
@@ -80,11 +80,11 @@ def normalize_name(s: str) -> str:
 @st.cache_data
 def load_rate_database(excel_path: str):
     wb = load_workbook(excel_path, read_only=True)
-    normalized_rates = {}
-    norm_to_raw = {}
+    normalized_rates: dict[str, float] = {}
+    norm_to_raw: dict[str, str] = {}
 
     for sheet in wb.sheetnames:
-        # read everything to find header row
+        # read raw to find header row
         df_raw = pd.read_excel(excel_path, sheet_name=sheet, header=None)
         header_row = None
         for idx, val in enumerate(df_raw.iloc[:, 0]):
@@ -96,16 +96,12 @@ def load_rate_database(excel_path: str):
         if header_row is None:
             continue
 
-        # now read with the header row
         df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
         if not {"Name", "Pay Rate"}.issubset(df.columns):
             continue
 
-        # keep only the two needed columns
         df = df[["Name", "Pay Rate"]].copy()
-        # **COERCE** Pay Rate into numeric (strings → NaN)
         df["Pay Rate"] = pd.to_numeric(df["Pay Rate"], errors="coerce")
-        # drop any rows where Name or Pay Rate failed to parse
         df = df.dropna(subset=["Name", "Pay Rate"])
 
         for _, row in df.iterrows():
@@ -117,7 +113,7 @@ def load_rate_database(excel_path: str):
 
     return normalized_rates, norm_to_raw
 
-# load the rates
+# Load rates once per run (cached)
 normalized_rates, norm_to_raw = load_rate_database(RATE_FILE_PATH)
 
 def lookup_match(name: str):
@@ -146,49 +142,87 @@ def calculate_pay(name: str, daily_data: list[dict]):
         else:
             wd += h
     overtime = max(0, wd - 50)
-    total_pay = ((wd - overtime) * rate +
-                 overtime * rate * 1.5 +
-                 sat * rate * 1.5 +
-                 sun * rate * 1.75)
-    return wd, sat, sun, rate, total_pay, matched, ratio
+    total = (wd - overtime) * rate + overtime * rate*1.5 + sat * rate*1.5 + sun * rate*1.75
+    return wd, sat, sun, rate, total, matched, ratio
 
 def extract_timesheet_data(file) -> list[dict]:
-    # your DOCX parsing here...
-    pass
+    # your DOCX parsing logic goes here
+    # return a list of dicts like:
+    # [{"name": ..., "daily": [...], "client": ..., "site_address": ..., "department": ...}, ...]
+    return []
 
 def extract_timesheet_data_pdf(file) -> list[dict]:
-    # your PDF parsing here...
-    pass
+    # your PDF parsing logic goes here (same return structure)
+    return []
 
-# ==== Streamlit App ====
+# ==== STREAMLIT UI: TABS ====
 tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
 
-# 1️⃣ Upload & Review (ZIP)
+# ---- 1️⃣ UPLOAD & REVIEW ----
 with tabs[0]:
     st.header("📥 Bulk‑Upload via ZIP")
     st.write("Upload a ZIP containing subfolders of `.pdf` & `.docx` timesheets.")
     uploaded_zip = st.file_uploader("Select ZIP file", type="zip")
+
     if uploaded_zip:
         try:
             z = zipfile.ZipFile(io.BytesIO(uploaded_zip.read()))
         except zipfile.BadZipFile:
             st.error("Invalid ZIP. Please re‑zip and retry.")
         else:
-            count = 0
-            for f in z.namelist():
-                if f.lower().endswith((".pdf", ".docx")):
-                    raw = z.read(f)
-                    bio = BytesIO(raw); bio.name = Path(f).name
-                    recs = (
-                        extract_timesheet_data_pdf(bio)
-                        if f.lower().endswith(".pdf")
-                        else extract_timesheet_data(bio)
-                    )
-                    # …your processing logic (calculate_pay, DB insert, preview)…  
-                    count += 1
-            st.success(f"Processed {count} files!")
+            all_records: list[dict] = []
+            file_count = 0
 
-# 2️⃣ History (grouped by week)
+            for member in z.namelist():
+                if member.lower().endswith((".pdf", ".docx")):
+                    raw = z.read(member)
+                    bio = BytesIO(raw)
+                    bio.name = Path(member).name
+                    file_count += 1
+
+                    # extract
+                    if member.lower().endswith(".pdf"):
+                        recs = extract_timesheet_data_pdf(bio)
+                    else:
+                        recs = extract_timesheet_data(bio)
+
+                    # tag & collect
+                    for rec in recs:
+                        rec["source_file"] = bio.name
+                        rec["upload_timestamp"] = datetime.now()
+                        all_records.append(rec)
+
+            st.success(f"Processed {file_count} files & {len(all_records)} records!")
+
+            if all_records:
+                df = pd.DataFrame(all_records)
+                st.subheader("🔍 Preview of extracted entries")
+                st.dataframe(df, use_container_width=True)
+
+                if st.button("💾 Save all to database"):
+                    # parameter style differs between SQLite & Postgres; unify via named style
+                    for rec in all_records:
+                        if isinstance(conn, sqlite3.Connection):
+                            placeholders = ",".join("?" * len(rec))
+                            columns = ",".join(rec.keys())
+                            c.execute(
+                                f"INSERT INTO timesheet_entries ({columns}) VALUES ({placeholders})",
+                                tuple(rec.values())
+                            )
+                        else:
+                            # psycopg2 named style
+                            cols = ", ".join(rec.keys())
+                            vals = ", ".join(f"%({k})s" for k in rec.keys())
+                            c.execute(
+                                f"INSERT INTO timesheet_entries ({cols}) VALUES ({vals})",
+                                rec
+                            )
+                    conn.commit()
+                    st.success(f"Saved {len(all_records)} records to the DB!")
+            else:
+                st.info("🤔 No timesheet entries were found in your files.")
+
+# ---- 2️⃣ HISTORY ----
 with tabs[1]:
     st.header("🗃️ Timesheet Upload History")
     query = """
@@ -199,31 +233,36 @@ with tabs[1]:
       ORDER BY upload_timestamp DESC LIMIT 1000
     """
     c.execute(query)
-    df = pd.DataFrame(c.fetchall(), columns=[
+    rows = c.fetchall()
+    df = pd.DataFrame(rows, columns=[
         "Name","Matched As","Ratio","Client","Site Address","Department",
         "Weekday Hours","Saturday Hours","Sunday Hours","Rate (£)",
         "Date Range","Extracted On","Source File","Upload Timestamp"
     ])
+
     df["Upload Timestamp"] = pd.to_datetime(df["Upload Timestamp"])
-    df["week_start"] = df["Upload Timestamp"].dt.to_period("W-MON") \
-                                 .apply(lambda r: r.start_time.date())
+    df["week_start"] = df["Upload Timestamp"].dt.to_period("W-MON").apply(lambda r: r.start_time.date())
+
     for wk, sub in df.groupby("week_start"):
         with st.expander(f"Week of {wk} ({len(sub)} entries)"):
-            st.dataframe(sub.sort_values("Upload Timestamp")
-                             .drop(columns="week_start"),
-                         use_container_width=True)
+            st.dataframe(
+                sub.sort_values("Upload Timestamp")
+                   .drop(columns="week_start"),
+                use_container_width=True
+            )
 
-# 3️⃣ Dashboard
+# ---- 3️⃣ DASHBOARD ----
 with tabs[2]:
     st.header("📊 Dashboard")
     st.write("Aggregate stats for all stored timesheets.")
-    # …your existing dashboard code…
+    # …your existing dashboard charts/code…
 
-# 4️⃣ Settings
+# ---- 4️⃣ SETTINGS ----
 with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - ZIP upload will recurse through all folders for `.pdf` & `.docx`.
+    - ZIP upload will recurse through subfolders for `.pdf` & `.docx`.
     - Use the sidebar “Upload Pay‑Rates Excel” to replace `pay details.xlsx`.
     - Unmatched names default to £15/hr.
+    - After upload & preview, click “Save all” to persist entries.
     """)
