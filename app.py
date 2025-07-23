@@ -11,7 +11,7 @@ import unicodedata
 import matplotlib.pyplot as plt
 from io import BytesIO
 from datetime import datetime
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 
 # ==== CONFIG & DB Connection ====
@@ -82,31 +82,42 @@ def load_rate_database(excel_path: str):
     wb = load_workbook(excel_path, read_only=True)
     normalized_rates = {}
     norm_to_raw = {}
+
     for sheet in wb.sheetnames:
+        # read everything to find header row
         df_raw = pd.read_excel(excel_path, sheet_name=sheet, header=None)
         header_row = None
-        for idx, val in enumerate(df_raw[0]):
+        for idx, val in enumerate(df_raw.iloc[:, 0]):
             if isinstance(val, str) and val.strip().lower() == "name":
-                if (
-                    isinstance(df_raw.iat[idx, 1], str)
-                    and df_raw.iat[idx, 1].strip().lower() == "pay rate"
-                ):
+                second = df_raw.iat[idx, 1]
+                if isinstance(second, str) and second.strip().lower() == "pay rate":
                     header_row = idx
                     break
         if header_row is None:
             continue
+
+        # now read with the header row
         df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
         if not {"Name", "Pay Rate"}.issubset(df.columns):
             continue
-        df = df[["Name", "Pay Rate"]].dropna(subset=["Name","Pay Rate"])
+
+        # keep only the two needed columns
+        df = df[["Name", "Pay Rate"]].copy()
+        # **COERCE** Pay Rate into numeric (strings → NaN)
+        df["Pay Rate"] = pd.to_numeric(df["Pay Rate"], errors="coerce")
+        # drop any rows where Name or Pay Rate failed to parse
+        df = df.dropna(subset=["Name", "Pay Rate"])
+
         for _, row in df.iterrows():
-            raw = str(row["Name"]).strip()
+            raw_name = str(row["Name"]).strip()
             rate = float(row["Pay Rate"])
-            norm = normalize_name(raw)
+            norm = normalize_name(raw_name)
             normalized_rates[norm] = rate
-            norm_to_raw[norm] = raw
+            norm_to_raw[norm] = raw_name
+
     return normalized_rates, norm_to_raw
 
+# load the rates
 normalized_rates, norm_to_raw = load_rate_database(RATE_FILE_PATH)
 
 def lookup_match(name: str):
@@ -127,16 +138,19 @@ def calculate_pay(name: str, daily_data: list[dict]):
     wd = sat = sun = 0.0
     for e in daily_data:
         h = e["hours"]
-        day = e["weekday"]
-        if day == "Saturday":
+        d = e["weekday"]
+        if d == "Saturday":
             sat += h
-        elif day == "Sunday":
+        elif d == "Sunday":
             sun += h
         else:
             wd += h
-    overtime = max(0, wd-50)
-    pay = (wd-overtime)*rate + overtime*rate*1.5 + sat*rate*1.5 + sun*rate*1.75
-    return wd, sat, sun, rate, pay, matched, ratio
+    overtime = max(0, wd - 50)
+    total_pay = ((wd - overtime) * rate +
+                 overtime * rate * 1.5 +
+                 sat * rate * 1.5 +
+                 sun * rate * 1.75)
+    return wd, sat, sun, rate, total_pay, matched, ratio
 
 def extract_timesheet_data(file) -> list[dict]:
     # your DOCX parsing here...
@@ -164,14 +178,13 @@ with tabs[0]:
             for f in z.namelist():
                 if f.lower().endswith((".pdf", ".docx")):
                     raw = z.read(f)
-                    bio = BytesIO(raw); bio.name=Path(f).name
+                    bio = BytesIO(raw); bio.name = Path(f).name
                     recs = (
                         extract_timesheet_data_pdf(bio)
                         if f.lower().endswith(".pdf")
                         else extract_timesheet_data(bio)
                     )
-                    # --- your processing of recs goes here ---
-                    # e.g. loop recs → calculate_pay → DB insert
+                    # …your processing logic (calculate_pay, DB insert, preview)…  
                     count += 1
             st.success(f"Processed {count} files!")
 
@@ -192,16 +205,19 @@ with tabs[1]:
         "Date Range","Extracted On","Source File","Upload Timestamp"
     ])
     df["Upload Timestamp"] = pd.to_datetime(df["Upload Timestamp"])
-    df["week_start"] = df["Upload Timestamp"].dt.to_period("W-MON").apply(lambda r: r.start_time.date())
+    df["week_start"] = df["Upload Timestamp"].dt.to_period("W-MON") \
+                                 .apply(lambda r: r.start_time.date())
     for wk, sub in df.groupby("week_start"):
         with st.expander(f"Week of {wk} ({len(sub)} entries)"):
-            st.dataframe(sub.sort_values("Upload Timestamp").drop(columns="week_start"), use_container_width=True)
+            st.dataframe(sub.sort_values("Upload Timestamp")
+                             .drop(columns="week_start"),
+                         use_container_width=True)
 
 # 3️⃣ Dashboard
 with tabs[2]:
     st.header("📊 Dashboard")
     st.write("Aggregate stats for all stored timesheets.")
-    # … your existing dashboard code …
+    # …your existing dashboard code…
 
 # 4️⃣ Settings
 with tabs[3]:
