@@ -144,13 +144,13 @@ def calculate_pay(name: str, daily_data: list[dict]):
     total = reg + ot + sp + sup
     return wd, sat, sun, rate, total, matched_raw or "No match", ratio
 
-# ==== STUBS FOR YOUR EXTRACTORS ====
+# ==== YOUR ORIGINAL EXTRACTORS HERE ====
 def extract_timesheet_data(file) -> dict:
-    # TODO: implement DOCX parsing
+    # …paste your full DOCX logic from the old app…
     return {}
 
 def extract_timesheet_data_pdf(file) -> list[dict]:
-    # TODO: implement PDF parsing
+    # …paste your full PDF logic from the old app…
     return []
 
 # ==== STREAMLIT UI: TABS ====
@@ -171,7 +171,6 @@ with tabs[0]:
         prog = st.progress(0)
         for idx, f in enumerate(uploaded):
             nm = f.name.lower()
-            # handle ZIP
             if nm.endswith(".zip"):
                 try:
                     zp = zipfile.ZipFile(io.BytesIO(f.read()))
@@ -188,15 +187,12 @@ with tabs[0]:
                         else:
                             for rec in extract_timesheet_data_pdf(bio):
                                 all_records.append(rec)
-            # handle DOCX
             elif nm.endswith(".docx"):
                 rec = extract_timesheet_data(f)
                 if rec: all_records.append(rec)
-            # handle PDF
             elif nm.endswith(".pdf"):
                 for rec in extract_timesheet_data_pdf(f):
                     all_records.append(rec)
-
             prog.progress((idx+1)/len(uploaded))
 
         st.success(f"✅ Processed {len(uploaded)} uploads → {len(all_records)} records")
@@ -225,24 +221,25 @@ with tabs[0]:
 
             # Validation
             problems = []
-            for i, row in df.iterrows():
-                for hcol, mx in [("Weekday Hours",168),("Saturday Hours",24),("Sunday Hours",24)]:
+            for i,row in df.iterrows():
+                for hcol,mx in [("Weekday Hours",168),("Saturday Hours",24),("Sunday Hours",24)]:
                     if hcol in row and (row[hcol]<0 or row[hcol]>mx):
                         problems.append(f"Row {i+1}: {hcol} out of range")
             if problems:
                 st.error("⚠️ Data validation issues:")
-                for p in problems: st.write(f"- {p}")
+                for p in problems:
+                    st.write(f"- {p}")
 
             # Insert into DB
             if not problems:
-                for row in all_records:
-                    wd, sat, sun, rate, total, ma, ratio = calculate_pay(row.get("name",""), row.get("daily",[]))
+                for rec in all_records:
+                    wd, sat, sun, rate, total, ma, ratio = calculate_pay(rec.get("name",""), rec.get("daily",[]))
                     params = (
-                        row.get("name",""), ma, ratio, row.get("client",""),
-                        row.get("site_address",""), row.get("department",""),
+                        rec.get("name",""), ma, ratio, rec.get("client",""),
+                        rec.get("site_address",""), rec.get("department",""),
                         wd, sat, sun, rate,
-                        row.get("date_range",""), row.get("extracted_on",""),
-                        row.get("source_file",""), datetime.now()
+                        rec.get("date_range",""), rec.get("extracted_on",""),
+                        rec.get("source_file",""), datetime.now()
                     )
                     if isinstance(conn, sqlite3.Connection):
                         ph = ",".join("?"*14)
@@ -268,8 +265,7 @@ with tabs[0]:
             # Final Preview
             if "Calculated Pay (£)" not in df.columns:
                 df["Calculated Pay (£)"] = df.apply(
-                    lambda r: calculate_pay(r.get("name",""), r.get("daily",[]))[4],
-                    axis=1
+                    lambda r: calculate_pay(r.get("name",""), r.get("daily",[]))[4], axis=1
                 )
             st.markdown("### 📋 Final Timesheet Table")
             st.dataframe(df, use_container_width=True)
@@ -299,8 +295,9 @@ with tabs[0]:
             ws.append(headers)
             for cell in ws[1]:
                 cell.font = Font(bold=True)
-                cell.fill = PatternFill(fill_type="solid", start_color="D9D9D9", end_color="D9D9D9")
-            for i, row in df.iterrows():
+                cell.fill = PatternFill(fill_type="solid",
+                                       start_color="D9D9D9", end_color="D9D9D9")
+            for i,row in df.iterrows():
                 r = i+2
                 regf = f"=MIN(G{r},50)*J{r}"
                 otf  = f"=MAX(G{r}-50,0)*J{r}*1.5"
@@ -321,7 +318,6 @@ with tabs[0]:
                 file_name="PRL_Timesheet_Report.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         else:
             st.info("ℹ️ No records extracted – check your extractor logic.")
 
@@ -373,7 +369,7 @@ with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
     - Drop in a new Pay‑Rates Excel in the sidebar to update rates.
-    - Upload `.docx`, `.pdf`, or a `.zip` of them in the Upload & Review tab.
+    - Upload `.docx`, `.pdf`, or a `.zip` of them in the Upload & Review tab.
     - Expand Debug to inspect name‑matching.
     - Export an Excel with live formulas and save to History.
     """)
