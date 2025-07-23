@@ -4,18 +4,15 @@ import zipfile
 import sqlite3
 import streamlit as st
 import pandas as pd
-import docx
-import pdfplumber
 import re
 import unicodedata
-import matplotlib.pyplot as plt
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 
-# ==== DB CONNECTION: Postgres if available, else SQLite ====
+# ==== DB CONNECTION & SCHEMA ==== 
 if "DATABASE_URL" in os.environ:
     import psycopg2
     from urllib.parse import urlparse
@@ -25,7 +22,6 @@ if "DATABASE_URL" in os.environ:
         password=url.password, host=url.hostname, port=url.port
     )
     c = conn.cursor()
-    # Use %s placeholders for Postgres
     placeholder = "%s"
     c.execute("""
     CREATE TABLE IF NOT EXISTS timesheet_entries (
@@ -42,7 +38,6 @@ if "DATABASE_URL" in os.environ:
 else:
     conn = sqlite3.connect("prl_timesheets.db", check_same_thread=False)
     c = conn.cursor()
-    # Use ? placeholders for SQLite
     placeholder = "?"
     c.execute("""
     CREATE TABLE IF NOT EXISTS timesheet_entries (
@@ -58,21 +53,21 @@ else:
     """)
 conn.commit()
 
-# ==== SCHEMA MIGRATION: add new pay columns if missing (SQLite only) ====
+# ==== MIGRATION: add new columns if missing (SQLite) ====
 if isinstance(conn, sqlite3.Connection):
-    existing = [row[1] for row in c.execute("PRAGMA table_info(timesheet_entries)").fetchall()]
+    cols = [r[1] for r in c.execute("PRAGMA table_info(timesheet_entries)").fetchall()]
     for col in ("default_rate","default_pay","paul_rate","paul_pay"):
-        if col not in existing:
+        if col not in cols:
             c.execute(f"ALTER TABLE timesheet_entries ADD COLUMN {col} REAL")
     conn.commit()
 
-# ==== PAGE CONFIG & RATE FILES ====
+# ==== PAGE + RATE FILES ==== 
 st.set_page_config(page_title="PRL Timesheet Portal", page_icon="📑", layout="wide")
 DEFAULT_RATE_FILE = "pay details.xlsx"
 PAUL_RATE_FILE   = "PAUL RATES.xlsx"
 DEFAULT_RATE     = 15.0
 
-# ==== HELPERS: NAME NORMALIZATION ==== 
+# ==== HELPERS ==== 
 def normalize_name(s: str) -> str:
     s = s.lower().strip()
     s = unicodedata.normalize("NFD", s)
@@ -80,7 +75,6 @@ def normalize_name(s: str) -> str:
     s = re.sub(r"[^a-z0-9\s]", "", s)
     return re.sub(r"\s+", " ", s)
 
-# ==== LOAD RATE SHEETS ====
 @st.cache_data
 def load_rate_database(path: str):
     if not os.path.exists(path):
@@ -89,20 +83,18 @@ def load_rate_database(path: str):
     rates, norm2raw = {}, {}
     for sheet in wb.sheetnames:
         df0 = pd.read_excel(path, sheet_name=sheet, header=None)
-        header_row = None
+        hdr = None
         for i, v in enumerate(df0.iloc[:,0]):
             if isinstance(v,str) and v.strip().lower()=="name" \
                and isinstance(df0.iat[i,1],str) and df0.iat[i,1].strip().lower()=="pay rate":
-                header_row = i
-                break
-        if header_row is None:
+                hdr = i; break
+        if hdr is None:
             continue
-        df = pd.read_excel(path, sheet_name=sheet, header=header_row)
-        if not {"Name","Pay Rate"}.issubset(df.columns):
+        df = pd.read_excel(path, sheet_name=sheet, header=hdr)
+        if not {"Name","Pay Rate"}.issubset(df.columns): 
             continue
-        df = df[["Name","Pay Rate"]].copy()
+        df = df[["Name","Pay Rate"]].dropna(subset=["Name","Pay Rate"])
         df["Pay Rate"] = pd.to_numeric(df["Pay Rate"], errors="coerce")
-        df = df.dropna(subset=["Name","Pay Rate"])
         for _, row in df.iterrows():
             raw = str(row["Name"]).strip()
             rate = float(row["Pay Rate"])
@@ -114,59 +106,48 @@ def load_rate_database(path: str):
 default_rates, default_norm2raw = load_rate_database(DEFAULT_RATE_FILE)
 paul_rates,   paul_norm2raw   = load_rate_database(PAUL_RATE_FILE)
 
-# ==== LOOKUP & PAY CALCULATION ====
 def lookup_rate(name: str, rates: dict, norm2raw: dict):
     norm = normalize_name(name)
     if norm in rates:
         return norm2raw[norm], rates[norm]
     return None, DEFAULT_RATE
 
-def compute_pay(hours: float, rate: float, threshold=50.0):
+def compute_pay(hours, rate, threshold=50.0):
     overtime = max(0.0, hours - threshold)
     regular = hours - overtime
     return regular*rate + overtime*rate*1.5
 
-# ==== ORIGINAL EXTRACTORS ====
-def hhmm_to_float(hhmm: str) -> float:
-    try:
-        h, m = hhmm.split(":")
-        return int(h) + int(m)/60.0
-    except:
-        return 0.0
-
+# ==== STUB EXTRACTORS ==== 
 def extract_timesheet_data(file) -> dict:
-    # <— your full DOCX parsing logic here, return a dict with at least:
-    #    "Name","Matched As","Ratio","Client","Site Address","Department",
-    #    "Weekday Hours","Saturday Hours","Sunday Hours",
-    #    "Date Range","Extracted On","Source File"
+    # your DOCX logic here
     return {}
 
 def extract_timesheet_data_pdf(file) -> list[dict]:
-    # <— your full PDF parsing logic here, return list of similar dicts
+    # your PDF logic here
     return []
 
-# ==== SIDEBAR: RELOAD RATE SHEETS ====
+# ==== SIDEBAR: RELOAD RATE FILES ==== 
 if st.sidebar.button("🔄 Reload Rate Files"):
     st.cache_data.clear()
-    st.experimental_rerun()
+    st.rerun()
 
-# ==== STREAMLIT UI: TABS ====
+# ==== UI TABS ==== 
 tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
 
 # ---- 1️⃣ UPLOAD & REVIEW ----
 with tabs[0]:
-    st.header("📥 Upload Timesheets (.docx/.pdf/.zip)")
-    uploaded = st.file_uploader(
-        "Select files or a ZIP",
-        type=["docx","pdf","zip"], accept_multiple_files=True
+    st.header("📥 Upload Timesheets `.docx` / `.pdf` / `.zip`")
+    uploads = st.file_uploader(
+        "Select files or a ZIP", type=["docx","pdf","zip"], accept_multiple_files=True
     )
-    if uploaded:
-        rows = []
+
+    if uploads:
+        records = []
         prog = st.progress(0)
-        total = len(uploaded)
-        for i, f in enumerate(uploaded):
+        total = len(uploads)
+        for i, f in enumerate(uploads):
             nm = f.name.lower()
-            sources = []
+            buffers = []
             if nm.endswith(".zip"):
                 try:
                     zp = zipfile.ZipFile(io.BytesIO(f.read()))
@@ -175,49 +156,49 @@ with tabs[0]:
                     continue
                 for member in zp.namelist():
                     if member.lower().endswith((".docx",".pdf")):
-                        bio = BytesIO(zp.read(member)); bio.name = Path(member).name
-                        sources.append(bio)
+                        buf = BytesIO(zp.read(member)); buf.name = Path(member).name
+                        buffers.append(buf)
             else:
-                sources.append(f)
+                buffers.append(f)
 
-            for src in sources:
-                if src.name.lower().endswith(".docx"):
-                    recs = [extract_timesheet_data(src)]
+            for buf in buffers:
+                if buf.name.lower().endswith(".docx"):
+                    recs = [extract_timesheet_data(buf)]
                 else:
-                    recs = extract_timesheet_data_pdf(src)
+                    recs = extract_timesheet_data_pdf(buf)
                 for rec in recs:
-                    wd = rec["Weekday Hours"]
-                    sat = rec["Saturday Hours"]
-                    sun = rec["Sunday Hours"]
+                    # DEFENSIVE ACCESS OF HOURS
+                    wd  = rec.get("Weekday Hours", rec.get("weekday_hours", 0))
+                    sat = rec.get("Saturday Hours", rec.get("saturday_hours", 0))
+                    sun = rec.get("Sunday Hours", rec.get("sunday_hours", 0))
 
-                    # default
-                    _, dr = lookup_rate(rec["Name"], default_rates, default_norm2raw)
-                    default_pay = compute_pay(wd, dr) + sat*dr*1.5 + sun*dr*1.75
+                    # default pay
+                    _, dr = lookup_rate(rec.get("Name",""), default_rates, default_norm2raw)
+                    dp = compute_pay(wd, dr) + sat*dr*1.5 + sun*dr*1.75
 
-                    # paul
-                    _, pr = lookup_rate(rec["Name"], paul_rates, paul_norm2raw)
-                    paul_pay = compute_pay(wd, pr) + sat*pr*1.5 + sun*pr*1.75
+                    # paul pay
+                    _, pr = lookup_rate(rec.get("Name",""), paul_rates, paul_norm2raw)
+                    pp = compute_pay(wd, pr) + sat*pr*1.5 + sun*pr*1.75
 
-                    rows.append({
+                    records.append({
                         **rec,
                         "Default Rate (£)": dr,
-                        "Default Pay (£)": default_pay,
+                        "Default Pay (£)": dp,
                         "Paul Rate (£)": pr,
-                        "Paul Pay (£)": paul_pay
+                        "Paul Pay (£)": pp
                     })
 
             prog.progress((i+1)/total)
 
-        df = pd.DataFrame(rows)
-        st.success(f"✅ Processed {len(rows)} records")
+        df = pd.DataFrame(records)
+        st.success(f"✅ Processed {len(records)} records")
 
-        # display
+        # SHOW & EXPORT
         st.dataframe(df, use_container_width=True)
 
-        # export Excel
         buf = BytesIO()
         wb = Workbook()
-        ws = wb.active; ws.title = "Report"
+        ws = wb.active; ws.title = "Comparison"
         ws.append(list(df.columns))
         for cell in ws[1]:
             cell.font = Font(bold=True)
@@ -232,17 +213,16 @@ with tabs[0]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# ---- 2️⃣ HISTORY (WEEKLY) ----
+# ---- 2️⃣ HISTORY ----
 with tabs[1]:
-    st.header("🗃️ Upload History")
+    st.header("🗃️ Upload History (Weekly)")
     c.execute(f"""
       SELECT name, matched_as, ratio, client, site_address, department,
              weekday_hours, saturday_hours, sunday_hours,
              default_rate, default_pay, paul_rate, paul_pay,
              date_range, extracted_on, source_file, upload_timestamp
         FROM timesheet_entries
-      ORDER BY upload_timestamp DESC
-      LIMIT 1000
+      ORDER BY upload_timestamp DESC LIMIT 1000
     """)
     hist = pd.DataFrame(c.fetchall(), columns=[
         "Name","Matched As","Ratio","Client","Site Address","Department",
@@ -269,8 +249,8 @@ with tabs[2]:
 with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - Click **Reload Rate Files** in the sidebar after uploading new rate sheets.
-    - Upload `.docx`, `.pdf`, or `.zip` in the Upload & Review tab.
-    - Export the comparison via the Download button.
-    - History shows all uploads grouped by week.
+    - Upload new rate sheets via the Sidebar and click **Reload Rate Files**.
+    - Import `.docx`, `.pdf`, or `.zip` files in Upload & Review.
+    - Table and Excel export compare Default vs Paul pay.
+    - History groups past uploads by week.
     """)
