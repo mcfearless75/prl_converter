@@ -15,7 +15,26 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 
-# ==== DB Connection: Postgres if available, else SQLite ====
+# ==== PAGE CONFIG & RATE FILE ====
+st.set_page_config(page_title="PRL Timesheet Portal", page_icon="📑", layout="wide")
+RATE_FILE_PATH = "pay details.xlsx"
+DEFAULT_RATE = 15.0
+
+# ==== SIDEBAR: UPLOAD PAY‑RATES EXCEL ====
+st.sidebar.title("⚙️ PRL Timesheet Converter")
+excel_uploader = st.sidebar.file_uploader(
+    "📥 Upload Pay‑Rates Excel",
+    type=["xlsx"],
+    help="Drop in a fresh pay details.xlsx to update rates."
+)
+if excel_uploader:
+    with open(RATE_FILE_PATH, "wb") as f:
+        f.write(excel_uploader.getbuffer())
+    st.sidebar.success("✅ Pay‑rates file updated!")
+    st.cache_data.clear()
+    st.rerun()
+
+# ==== DATABASE CONNECTION ====
 if "DATABASE_URL" in os.environ:
     import psycopg2
     from urllib.parse import urlparse
@@ -27,7 +46,8 @@ if "DATABASE_URL" in os.environ:
     c = conn.cursor()
     c.execute("""
     CREATE TABLE IF NOT EXISTS timesheet_entries (
-      id SERIAL PRIMARY KEY, name TEXT, matched_as TEXT, ratio REAL,
+      id SERIAL PRIMARY KEY,
+      name TEXT, matched_as TEXT, ratio REAL,
       client TEXT, site_address TEXT, department TEXT,
       weekday_hours REAL, saturday_hours REAL, sunday_hours REAL,
       rate REAL, date_range TEXT, extracted_on TEXT,
@@ -39,8 +59,9 @@ else:
     c = conn.cursor()
     c.execute("""
     CREATE TABLE IF NOT EXISTS timesheet_entries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, matched_as TEXT,
-      ratio REAL, client TEXT, site_address TEXT, department TEXT,
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT, matched_as TEXT, ratio REAL,
+      client TEXT, site_address TEXT, department TEXT,
       weekday_hours REAL, saturday_hours REAL, sunday_hours REAL,
       rate REAL, date_range TEXT, extracted_on TEXT,
       source_file TEXT, upload_timestamp TEXT
@@ -48,17 +69,7 @@ else:
     """)
 conn.commit()
 
-# ==== Page config & Rate file ====
-st.set_page_config(page_title="PRL Timesheet Portal", page_icon="📑", layout="wide")
-RATE_FILE_PATH = "pay details.xlsx"
-DEFAULT_RATE = 15.0
-
-# ==== Sidebar: Reload pay rates ====
-if st.sidebar.button("🔄 Reload Pay Rates"):
-    st.cache_data.clear()
-    st.rerun()
-
-# ==== Name normalization & rate DB loader ====
+# ==== UTILITIES: NORMALIZE & LOAD RATES ====
 def normalize_name(s: str) -> str:
     s = s.lower().strip()
     s = unicodedata.normalize("NFD", s)
@@ -69,17 +80,18 @@ def normalize_name(s: str) -> str:
 @st.cache_data
 def load_rate_database(excel_path: str):
     wb = load_workbook(excel_path, read_only=True)
-    custom_rates = {}
     normalized_rates = {}
     norm_to_raw = {}
     for sheet in wb.sheetnames:
-        df_raw = pd.read_excel(excel_path, sheet_name=sheet, header=None)
+        df0 = pd.read_excel(excel_path, sheet_name=sheet, header=None)
         header_row = None
-        for idx, val in enumerate(df_raw.iloc[:,0]):
+        for i, val in enumerate(df0.iloc[:, 0]):
             if isinstance(val, str) and val.strip().lower() == "name":
-                second = df_raw.iat[idx,1]
-                if isinstance(second, str) and second.strip().lower() == "pay rate":
-                    header_row = idx
+                if (
+                    isinstance(df0.iat[i, 1], str)
+                    and df0.iat[i, 1].strip().lower() == "pay rate"
+                ):
+                    header_row = i
                     break
         if header_row is None:
             continue
@@ -89,16 +101,15 @@ def load_rate_database(excel_path: str):
         df = df[["Name","Pay Rate"]].copy()
         df["Pay Rate"] = pd.to_numeric(df["Pay Rate"], errors="coerce")
         df = df.dropna(subset=["Name","Pay Rate"])
-        for _,row in df.iterrows():
+        for _, row in df.iterrows():
             raw = str(row["Name"]).strip()
             rate = float(row["Pay Rate"])
-            custom_rates[raw] = rate
             norm = normalize_name(raw)
             normalized_rates[norm] = rate
             norm_to_raw[norm] = raw
-    return custom_rates, normalized_rates, list(normalized_rates.keys()), norm_to_raw
+    return normalized_rates, norm_to_raw
 
-custom_rates, normalized_rates, normalized_keys, norm_to_raw = load_rate_database(RATE_FILE_PATH)
+normalized_rates, norm_to_raw = load_rate_database(RATE_FILE_PATH)
 
 def lookup_match(name: str):
     norm = normalize_name(name)
@@ -116,158 +127,167 @@ def hhmm_to_float(hhmm: str) -> float:
 def calculate_pay(name: str, daily_data: list[dict]):
     matched_raw, rate, ratio = lookup_match(name)
     wd = sat = sun = 0.0
-    for entry in daily_data:
-        h = entry["hours"]
-        day = entry["weekday"]
+    for e in daily_data:
+        hrs = e.get("hours", 0)
+        day = e.get("weekday", "")
         if day == "Saturday":
-            sat += h
+            sat += hrs
         elif day == "Sunday":
-            sun += h
+            sun += hrs
         else:
-            wd += h
+            wd += hrs
     overtime = max(0, wd - 50)
-    reg_pay = (wd - overtime) * rate
-    ot_pay  = overtime * rate * 1.5
-    sat_pay = sat * rate * 1.5
-    sun_pay = sun * rate * 1.75
-    total   = reg_pay + ot_pay + sat_pay + sun_pay
+    reg = (wd - overtime) * rate
+    ot  = overtime * rate * 1.5
+    sp  = sat * rate * 1.5
+    sup = sun * rate * 1.75
+    total = reg + ot + sp + sup
     return wd, sat, sun, rate, total, matched_raw or "No match", ratio
 
-# ====== Stubs for your extractors ======
+# ==== STUBS FOR YOUR EXTRACTORS ====
 def extract_timesheet_data(file) -> dict:
-    # …your DOCX logic here…
+    # TODO: implement DOCX parsing
     return {}
 
 def extract_timesheet_data_pdf(file) -> list[dict]:
-    # …your PDF logic here…
+    # TODO: implement PDF parsing
     return []
 
-# ====== Streamlit Tabs UI ======
+# ==== STREAMLIT UI: TABS ====
 tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
 
-# ---- 1️⃣ Upload & Review ----
+# ---- 1️⃣ UPLOAD & REVIEW ----
 with tabs[0]:
-    st.sidebar.header("Upload Timesheets")
-    st.sidebar.markdown(
-        "1. Upload **.docx**, **.pdf**, or a **.zip** of them.\n"
-        "2. Expand **Debug** to inspect name-matching.\n"
-        "3. Export Excel with formulas and save to History."
-    )
-    uploaded_files = st.sidebar.file_uploader(
-        "Select files or ZIP", type=["docx","pdf","zip"], accept_multiple_files=True
+    st.header("📥 Upload Timesheet Files or ZIP")
+    st.write("Upload `.docx`, `.pdf`, or a `.zip` containing them.")
+    uploaded = st.file_uploader(
+        "Select files or ZIP",
+        type=["docx","pdf","zip"],
+        accept_multiple_files=True
     )
 
-    if uploaded_files:
-        all_rows = []
-        progress = st.progress(0)
-        total = len(uploaded_files)
-        for i, f in enumerate(uploaded_files):
-            name = f.name.lower()
-            # ZIP → recurse
-            if name.endswith(".zip"):
+    if uploaded:
+        all_records = []
+        prog = st.progress(0)
+        for idx, f in enumerate(uploaded):
+            nm = f.name.lower()
+            # handle ZIP
+            if nm.endswith(".zip"):
                 try:
-                    zb = zipfile.ZipFile(io.BytesIO(f.read()))
+                    zp = zipfile.ZipFile(io.BytesIO(f.read()))
                 except zipfile.BadZipFile:
-                    st.error(f"Bad ZIP: {f.name}")
+                    st.error(f"❌ Bad ZIP: {f.name}")
                     continue
-                for member in zb.namelist():
+                for member in zp.namelist():
                     if member.lower().endswith((".docx",".pdf")):
-                        data = zb.read(member)
+                        data = zp.read(member)
                         bio = BytesIO(data); bio.name = Path(member).name
                         if member.lower().endswith(".docx"):
                             rec = extract_timesheet_data(bio)
-                            if not rec.get("Name"):
-                                rec["Name"] = Path(bio.name).stem.title()
-                            all_rows.append(rec)
+                            if rec: all_records.append(rec)
                         else:
                             for rec in extract_timesheet_data_pdf(bio):
-                                all_rows.append(rec)
-            # Single DOCX/PDF
-            elif name.endswith(".docx"):
+                                all_records.append(rec)
+            # handle DOCX
+            elif nm.endswith(".docx"):
                 rec = extract_timesheet_data(f)
-                if not rec.get("Name"):
-                    rec["Name"] = Path(f.name).stem.title()
-                all_rows.append(rec)
-            elif name.endswith(".pdf"):
+                if rec: all_records.append(rec)
+            # handle PDF
+            elif nm.endswith(".pdf"):
                 for rec in extract_timesheet_data_pdf(f):
-                    all_rows.append(rec)
+                    all_records.append(rec)
 
-            progress.progress((i+1)/total)
+            prog.progress((idx+1)/len(uploaded))
 
-        df = pd.DataFrame(all_rows)
-        st.success(f"Processed {len(all_rows)} records from {total} uploads")
+        st.success(f"✅ Processed {len(uploaded)} uploads → {len(all_records)} records")
 
-        # 🔍 Debug table
-        if not df.empty:
-            debug_df = df[["Name","Matched As","Ratio","Rate (£)","Source File"]].drop_duplicates()
-            def hl(val):
-                if val=="No match" or (isinstance(val,(int,float)) and val<1.0):
-                    return "background-color: #FFCCCC"
-                return ""
-            styled = debug_df.style.applymap(hl, subset=["Matched As","Ratio"])
-            with st.expander("Show Name‑Match Debug Table"):
-                st.dataframe(styled, use_container_width=True)
+        if all_records:
+            df = pd.DataFrame(all_records)
 
-            # warnings
-            if (df["Matched As"]=="No match").any():
+            # Defensive Debug Table
+            debug_cols = ["Name","Matched As","Ratio","Rate (£)","Source File"]
+            cols = [c for c in debug_cols if c in df.columns]
+            if cols:
+                dbg = df[cols].drop_duplicates()
+                def hl(val):
+                    if val=="No match" or (isinstance(val,(int,float)) and val<1.0):
+                        return "background-color: #FFCCCC"
+                    return ""
+                styled = dbg.style.applymap(hl, subset=[c for c in cols if c in ("Matched As","Ratio")])
+                with st.expander("Show Name‑Match Debug Table"):
+                    st.dataframe(styled, use_container_width=True)
+            else:
+                st.info(f"No debug columns present. Found: {', '.join(df.columns)}")
+
+            # Warnings
+            if "Matched As" in df.columns and (df["Matched As"]=="No match").any():
                 st.warning("⚠️ Some names not matched; default rate used.")
 
-            # validation
+            # Validation
             problems = []
-            for idx,row in df.iterrows():
-                if row.get("Weekday Hours",0) <0 or row.get("Weekday Hours",0)>168:
-                    problems.append(f"Row {idx+1}: Weekday out of range")
-                if row.get("Saturday Hours",0)<0 or row.get("Saturday Hours",0)>24:
-                    problems.append(f"Row {idx+1}: Saturday out of range")
-                if row.get("Sunday Hours",0)<0 or row.get("Sunday Hours",0)>24:
-                    problems.append(f"Row {idx+1}: Sunday out of range")
+            for i, row in df.iterrows():
+                for hcol, mx in [("Weekday Hours",168),("Saturday Hours",24),("Sunday Hours",24)]:
+                    if hcol in row and (row[hcol]<0 or row[hcol]>mx):
+                        problems.append(f"Row {i+1}: {hcol} out of range")
             if problems:
                 st.error("⚠️ Data validation issues:")
-                for p in problems: st.write("- "+p)
+                for p in problems: st.write(f"- {p}")
 
             # Insert into DB
             if not problems:
-                for idx,row in df.iterrows():
+                for row in all_records:
+                    wd, sat, sun, rate, total, ma, ratio = calculate_pay(row.get("name",""), row.get("daily",[]))
                     params = (
-                        row["Name"], row["Matched As"], row["Ratio"], row["Client"],
-                        row["Site Address"], row["Department"], row["Weekday Hours"],
-                        row["Saturday Hours"], row["Sunday Hours"], row["Rate (£)"],
-                        row["Date Range"], row["Extracted On"], row["Source File"],
-                        datetime.now()
+                        row.get("name",""), ma, ratio, row.get("client",""),
+                        row.get("site_address",""), row.get("department",""),
+                        wd, sat, sun, rate,
+                        row.get("date_range",""), row.get("extracted_on",""),
+                        row.get("source_file",""), datetime.now()
                     )
                     if isinstance(conn, sqlite3.Connection):
                         ph = ",".join("?"*14)
-                        c.execute(f"INSERT INTO timesheet_entries VALUES (NULL,{ph})", params)
+                        c.execute(f"""
+                            INSERT INTO timesheet_entries
+                            (name, matched_as, ratio, client, site_address, department,
+                             weekday_hours, saturday_hours, sunday_hours, rate,
+                             date_range, extracted_on, source_file, upload_timestamp)
+                            VALUES ({ph})
+                        """, params)
                     else:
                         ph = ",".join("%s"*14)
-                        c.execute(f"INSERT INTO timesheet_entries VALUES (DEFAULT,{ph})", params)
+                        c.execute(f"""
+                            INSERT INTO timesheet_entries
+                            (name, matched_as, ratio, client, site_address, department,
+                             weekday_hours, saturday_hours, sunday_hours, rate,
+                             date_range, extracted_on, source_file, upload_timestamp)
+                            VALUES ({ph})
+                        """, params)
                 conn.commit()
-                st.success(f"✅ Inserted {len(df)} rows into history.")
+                st.success(f"✅ Saved {len(all_records)} records to history")
 
-            # Final table & summary
+            # Final Preview
             if "Calculated Pay (£)" not in df.columns:
                 df["Calculated Pay (£)"] = df.apply(
-                    lambda r: calculate_pay(r["Name"], r.get("daily",[]))[4], axis=1
+                    lambda r: calculate_pay(r.get("name",""), r.get("daily",[]))[4],
+                    axis=1
                 )
             st.markdown("### 📋 Final Timesheet Table")
             st.dataframe(df, use_container_width=True)
 
-            summary_df = (
-                df.groupby("Matched As")[["Calculated Pay (£)","Weekday Hours","Saturday Hours","Sunday Hours"]]
-                  .sum().reset_index().rename(columns={"Matched As":"Name"})
-            )
-            col1,col2 = st.columns([3,1])
-            with col1:
+            # Summary Metrics
+            summary = df.groupby("Matched As")[["Calculated Pay (£)","Weekday Hours","Saturday Hours","Sunday Hours"]].sum().reset_index().rename(columns={"Matched As":"Name"})
+            c1, c2 = st.columns([3,1])
+            with c1:
                 st.markdown("### 💰 Summary by Name")
-                st.dataframe(summary_df, use_container_width=True)
-            with col2:
-                tot_hrs = summary_df[["Weekday Hours","Saturday Hours","Sunday Hours"]].sum().sum()
-                tot_pay = summary_df["Calculated Pay (£)"].sum()
-                st.metric("Total Hours", f"{tot_hrs:.2f}")
-                st.metric("Total Pay", f"£{tot_pay:,.2f}")
+                st.dataframe(summary, use_container_width=True)
+            with c2:
+                total_hrs = summary[["Weekday Hours","Saturday Hours","Sunday Hours"]].sum().sum()
+                total_pay = summary["Calculated Pay (£)"].sum()
+                st.metric("Total Hours", f"{total_hrs:.2f}")
+                st.metric("Total Pay", f"£{total_pay:,.2f}")
 
-            # Download Excel with formulas
-            output = BytesIO()
+            # Excel Export with Formulas
+            out = BytesIO()
             wb_out = Workbook()
             ws = wb_out.active; ws.title = "Timesheets"
             headers = [
@@ -280,33 +300,32 @@ with tabs[0]:
             for cell in ws[1]:
                 cell.font = Font(bold=True)
                 cell.fill = PatternFill(fill_type="solid", start_color="D9D9D9", end_color="D9D9D9")
-            for idx,row in df.iterrows():
-                er = idx+2
-                regf = f"=MIN(G{er},50)*J{er}"
-                otf  = f"=MAX(G{er}-50,0)*J{er}*1.5"
-                sf   = f"=H{er}*J{er}*1.5"
-                sunf = f"=I{er}*J{er}*1.75"
-                tf   = f"=K{er}+L{er}+M{er}+N{er}"
+            for i, row in df.iterrows():
+                r = i+2
+                regf = f"=MIN(G{r},50)*J{r}"
+                otf  = f"=MAX(G{r}-50,0)*J{r}*1.5"
+                sf   = f"=H{r}*J{r}*1.5"
+                supf = f"=I{r}*J{r}*1.75"
+                tf   = f"=K{r}+L{r}+M{r}+N{r}"
                 ws.append([
-                    row["Name"], row["Matched As"], row["Ratio"], row["Client"],
-                    row["Site Address"], row["Department"],
-                    row["Weekday Hours"], row["Saturday Hours"], row["Sunday Hours"],
-                    row["Rate (£)",],
-                    regf, otf, sf, sunf, tf,
-                    row["Date Range"], row["Extracted On"], row["Source File"]
+                    row.get("name",""), row.get("Matched As",""), row.get("Ratio",""),
+                    row.get("client",""), row.get("site_address",""), row.get("department",""),
+                    row.get("Weekday Hours",0), row.get("Saturday Hours",0), row.get("Sunday Hours",0),
+                    row.get("Rate (£)",0), regf, otf, sf, supf, tf,
+                    row.get("date_range",""), row.get("extracted_on",""), row.get("source_file","")
                 ])
-            wb_out.save(output)
+            wb_out.save(out)
             st.download_button(
                 "📥 Download Excel with Formulas",
-                data=output.getvalue(),
+                data=out.getvalue(),
                 file_name="PRL_Timesheet_Report.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
         else:
-            st.info("ℹ️ No records found—check your uploads or extractor logic.")
+            st.info("ℹ️ No records extracted – check your extractor logic.")
 
-# ---- 2️⃣ History (grouped by week) ----
+# ---- 2️⃣ HISTORY (GROUPED BY WEEK) ----
 with tabs[1]:
     st.header("🗃️ Timesheet Upload History")
     query = """
@@ -318,42 +337,43 @@ with tabs[1]:
     """
     c.execute(query)
     rows = c.fetchall()
-    history_df = pd.DataFrame(rows, columns=[
+    hist_df = pd.DataFrame(rows, columns=[
         "Name","Matched As","Ratio","Client","Site Address","Department",
         "Weekday Hours","Saturday Hours","Sunday Hours","Rate (£)",
         "Date Range","Extracted On","Source File","Upload Timestamp"
     ])
-    history_df["Upload Timestamp"] = pd.to_datetime(history_df["Upload Timestamp"])
-    history_df["week_start"] = history_df["Upload Timestamp"].dt.to_period("W-MON").apply(lambda r: r.start_time.date())
-    for wk,grp in history_df.groupby("week_start"):
+    hist_df["Upload Timestamp"] = pd.to_datetime(hist_df["Upload Timestamp"])
+    hist_df["week_start"] = hist_df["Upload Timestamp"].dt.to_period("W-MON").apply(lambda r: r.start_time.date())
+    for wk, grp in hist_df.groupby("week_start"):
         with st.expander(f"Week of {wk} ({len(grp)} entries)"):
-            st.dataframe(grp.sort_values("Upload Timestamp").drop(columns="week_start"), use_container_width=True)
+            st.dataframe(grp.sort_values("Upload Timestamp").drop(columns=["week_start"]), use_container_width=True)
 
-# ---- 3️⃣ Dashboard ----
+# ---- 3️⃣ DASHBOARD ----
 with tabs[2]:
     st.header("📊 Dashboard")
     c.execute("""
       SELECT matched_as,
              SUM(weekday_hours), SUM(saturday_hours), SUM(sunday_hours),
-             SUM(weekday_hours*rate + saturday_hours*rate + sunday_hours*rate) as total_pay
-        FROM timesheet_entries GROUP BY matched_as
+             SUM(weekday_hours*rate + saturday_hours*rate + sunday_hours*rate) AS total_pay
+        FROM timesheet_entries
+       GROUP BY matched_as
     """)
     drows = c.fetchall()
-    dashboard_df = pd.DataFrame(drows, columns=[
+    dash_df = pd.DataFrame(drows, columns=[
         "Name","Weekday Hours","Saturday Hours","Sunday Hours","Total Pay"
     ])
-    if not dashboard_df.empty:
-        st.bar_chart(dashboard_df.set_index("Name")[["Weekday Hours","Saturday Hours","Sunday Hours"]])
-        st.markdown(f"**Total Pay (approx):** £{dashboard_df['Total Pay'].sum():,.2f}")
+    if not dash_df.empty:
+        st.bar_chart(dash_df.set_index("Name")[["Weekday Hours","Saturday Hours","Sunday Hours"]])
+        st.markdown(f"**Total Pay (approx):** £{dash_df['Total Pay'].sum():,.2f}")
     else:
         st.info("No data available yet.")
 
-# ---- 4️⃣ Settings ----
+# ---- 4️⃣ SETTINGS & INFO ----
 with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - Click **Reload Pay Rates** to re‑load your Excel.
-    - Upload `.zip` as well as `.docx`/`.pdf`.
-    - Name matching is case‑ and accent‑insensitive.
-    - Unmatched names default to £15/hr.
+    - Drop in a new Pay‑Rates Excel in the sidebar to update rates.
+    - Upload `.docx`, `.pdf`, or a `.zip` of them in the Upload & Review tab.
+    - Expand Debug to inspect name‑matching.
+    - Export an Excel with live formulas and save to History.
     """)
