@@ -84,7 +84,7 @@ def load_rate_database(source):
             to_raw[n] = raw
     return custom, normed, to_raw
 
-# ==== Rate‐Loader (multiple sheets) ====
+# ==== Rate‑Loader (multiple sheets) ====
 RATE_FILE = "pay_rates.xlsx"
 uploads = st.sidebar.file_uploader(
     "➕ Upload one or more pay‑rate XLSX files",
@@ -220,6 +220,7 @@ with tabs[0]:
             for i, uf in enumerate(uploaded):
                 st.write(f"➡️ Handling **{uf.name}** ({i+1}/{total})")
                 lower = uf.name.lower()
+
                 if lower.endswith(".zip"):
                     try:
                         z = zipfile.ZipFile(uf)
@@ -240,26 +241,23 @@ with tabs[0]:
                                 if m.lower().endswith(".docx")
                                 else extract_from_pdf(buf)
                             )
-                            st.write(
-                                f"   → Got {len(recs)} summary record(s)"
-                            )
+                            st.write(f"   → Got {len(recs)} summary record(s)")
                             summaries += recs
                     except zipfile.BadZipFile:
                         st.error(f"{uf.name} is not a valid ZIP.")
+
                 elif lower.endswith(".docx"):
                     st.write(" • Parsing DOCX…")
                     recs = extract_from_docx(uf)
-                    st.write(
-                        f"   → Got {len(recs)} summary record(s}"
-                    )
+                    st.write(f"   → Got {len(recs)} summary record(s)")
                     summaries += recs
+
                 elif lower.endswith(".pdf"):
                     st.write(" • Parsing PDF…")
                     recs = extract_from_pdf(uf)
-                    st.write(
-                        f"   → Got {len(recs)} summary record(s)"
-                    )
+                    st.write(f"   → Got {len(recs)} summary record(s)")
                     summaries += recs
+
                 else:
                     st.warning(f"Unsupported file: {uf.name}")
 
@@ -287,13 +285,7 @@ with tabs[0]:
             )
             # --------------------------------
 
-            # --- (Optional) Insert into DB and your original export logic ---
-            # for rec in summaries:
-            #     c.execute(
-            #         "INSERT INTO timesheet_entries (...) VALUES (…) ",
-            #         (…)
-            #     )
-            # conn.commit()
+            # Optional: insert into DB and your original export logic…
 
 # ---- 2) History (date‑filter + weekly summary) ----
 with tabs[1]:
@@ -304,19 +296,16 @@ with tabs[1]:
     start_date, end_date = st.date_input(
         "Select upload date range",
         value=(today - timedelta(days=30), today),
-        min_value=date(2020, 1, 1),
-        max_value=today
+        min_value=date(2020,1,1), max_value=today
     )
 
-    c.execute(
-        """
+    c.execute("""
         SELECT name, matched_as, ratio, client, site_address, department,
                weekday_hours, saturday_hours, sunday_hours, rate AS rate,
                date_range, extracted_on, source_file, upload_timestamp
         FROM timesheet_entries
         ORDER BY upload_timestamp DESC
-        """
-    )
+    """)
     rows = c.fetchall()
     cols = [
         "Name","Matched As","Ratio","Client","Site Address","Department",
@@ -350,8 +339,7 @@ with tabs[1]:
                     Sun_Hours=("Sunday Hours","sum"),
                     Total_Pay=("Pay","sum")
                 )
-                .reset_index()
-                .sort_values("Date Range", ascending=False)
+                .reset_index().sort_values("Date Range", ascending=False)
         )
 
         st.markdown("### 📅 Weekly Summary")
