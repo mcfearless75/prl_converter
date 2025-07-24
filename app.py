@@ -1,34 +1,35 @@
 import os
-import streamlit as st
-import pandas as pd
-import docx
-import pdfplumber
 import re
 import unicodedata
-import matplotlib.pyplot as plt
-from io import BytesIO
-from datetime import datetime
 from pathlib import Path
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from io import BytesIO
+from datetime import datetime, date, timedelta
 
-# ==== DB Connection: Use Postgres on Render, SQLite locally ====
+import streamlit as st
+import pandas as pd
+
+# For DOCX/PDF parsing (your existing code uses these)
+import docx
+import pdfplumber
+
+# For XLSX rate file
+from openpyxl import load_workbook
+
+# ==== DB Connection: Postgres on Render, SQLite locally ====
 if "DATABASE_URL" in os.environ:
     import psycopg2
     from urllib.parse import urlparse
     url = urlparse(os.environ["DATABASE_URL"])
     conn = psycopg2.connect(
-        dbname=url.path[1:],
-        user=url.username,
-        password=url.password,
-        host=url.hostname,
-        port=url.port
+        dbname=url.path[1:], user=url.username,
+        password=url.password, host=url.hostname, port=url.port
     )
 else:
     import sqlite3
     conn = sqlite3.connect("timesheets.db", check_same_thread=False)
 
 c = conn.cursor()
+# Ensure table exists
 c.execute("""
 CREATE TABLE IF NOT EXISTS timesheet_entries (
     id SERIAL PRIMARY KEY,
@@ -48,24 +49,29 @@ CREATE TABLE IF NOT EXISTS timesheet_entries (
     upload_timestamp TIMESTAMP
 )
 """)
+conn.commit()
 
-# ==== Helper Functions & Rate DB ====
-RATE_FILE_PATH = "pay_rates.xlsx"
-
+# ==== Helper: Normalize names ====
 def normalize_name(name: str) -> str:
     nfkd = unicodedata.normalize("NFKD", name)
     only_ascii = nfkd.encode("ASCII", "ignore").decode("utf-8")
     return re.sub(r"[^a-zA-Z]", "", only_ascii).lower()
 
-def load_rate_database(excel_path: str):
+# ==== Load pay‑rate database (from path or uploaded file) ====
+def load_rate_database(source):
+    """
+    `source` can be a filesystem path (str/Path) or a file‐like (uploaded).
+    Returns: (custom_rates, normalized_rates, norm_to_raw)
+    """
     custom_rates = {}
     normalized_rates = {}
     norm_to_raw = {}
-    wb = load_workbook(excel_path, data_only=True)
+    wb = load_workbook(source, data_only=True)
     for sheet in wb.sheetnames:
-        df_raw = pd.read_excel(excel_path, sheet_name=sheet, header=None)
+        # Read everything as DataFrame with no header to find where "Name" / "Pay Rate" live
+        df_raw = pd.read_excel(source, sheet_name=sheet, header=None)
         header_row = None
-        for idx, val in enumerate(df_raw[0]):
+        for idx, val in enumerate(df_raw.iloc[:,0]):
             if isinstance(val, str) and val.strip().lower() == "name":
                 second = df_raw.iat[idx, 1]
                 if isinstance(second, str) and second.strip().lower() == "pay rate":
@@ -73,7 +79,7 @@ def load_rate_database(excel_path: str):
                     break
         if header_row is None:
             continue
-        df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
+        df = pd.read_excel(source, sheet_name=sheet, header=header_row)
         if "Name" not in df.columns or "Pay Rate" not in df.columns:
             continue
         df = df[["Name", "Pay Rate"]].copy()
@@ -88,132 +94,160 @@ def load_rate_database(excel_path: str):
             norm_to_raw[norm] = raw_name
     return custom_rates, normalized_rates, norm_to_raw
 
-custom_rates, normalized_rates, norm_to_raw = load_rate_database(RATE_FILE_PATH)
+# ==== Sidebar: Upload pay_rates.xlsx or fallback ====
+RATE_FILE_PATH = "pay_rates.xlsx"
+rate_uploader = st.sidebar.file_uploader(
+    "➕ Upload pay_rates.xlsx (optional)", type=["xlsx"]
+)
 
+try:
+    if rate_uploader:
+        custom_rates, normalized_rates, norm_to_raw = load_rate_database(rate_uploader)
+    else:
+        if not Path(RATE_FILE_PATH).exists():
+            raise FileNotFoundError
+        custom_rates, normalized_rates, norm_to_raw = load_rate_database(RATE_FILE_PATH)
+except FileNotFoundError:
+    st.sidebar.warning(
+        "No pay_rates.xlsx found; defaulting to £15/hr for everyone. "
+        "Upload one above to enable custom rates."
+    )
+    custom_rates, normalized_rates, norm_to_raw = {}, {}, {}
+
+# ==== Lookup match or default ====
 def lookup_match(name: str):
     norm = normalize_name(name)
     if norm in normalized_rates:
         return norm_to_raw[norm], normalized_rates[norm], 1.0
-    else:
-        return name, 15.0, 0.0  # default
+    return name, 15.0, 0.0
 
-# (… your extract_from_docx, extract_from_pdf, hhmm_to_hours, calculate_pay, etc. …)
+# ==== Placeholders for your existing parsing logic ====
+def extract_from_docx(file) -> list[dict]:
+    """Your DOCX‐parsing returning a list of dicts per person/day."""
+    # … existing code …
+    return []
 
-# ====== Streamlit Tabs UI ======
-if st.sidebar.button("🔄 Reload Pay Rates"):
-    st.cache_data.clear()
-    st.experimental_rerun()
+def extract_from_pdf(file) -> list[dict]:
+    """Your PDF‐parsing returning a list of dicts per person/day."""
+    # … existing code …
+    return []
 
+def hhmm_to_hours(hhmm: str) -> float:
+    try:
+        h, m = hhmm.split(":")
+        return int(h) + int(m) / 60.0
+    except:
+        return 0.0
+
+def calculate_pay(name: str, daily_data: list[dict]) -> dict:
+    """
+    Summarize weekday/sat/sun hours for a given name
+    and return a dict including date_range, hours, rate, etc.
+    """
+    # … existing code …
+    return {}
+
+# ==== Sidebar: Timesheet uploads ====
 st.sidebar.header("Upload Timesheets")
 st.sidebar.markdown("""
 1. Upload **.docx** or **.pdf**  
 2. Confirm name‑matches (expand Debug)  
 3. Export Excel with formulas  
 """)
-uploaded_files = st.sidebar.file_uploader("Choose files", accept_multiple_files=True)
+uploaded_files = st.sidebar.file_uploader(
+    "Choose timesheet files", accept_multiple_files=True
+)
 
+# ==== Main Tabs ====
 tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
 
-# ---- 1. Upload & Review ----
+# ---- 1) Upload & Review ----
 with tabs[0]:
     st.header("📤 Upload & Review Timesheets")
-    # … your existing upload, parse, debug, export logic …
+    if uploaded_files:
+        st.success(f"Processing {len(uploaded_files)} file(s)…")
+        # … your parsing, match‐confirmation, debug expander, save to DB, export logic …
+    else:
+        st.info("Waiting for you to upload some .docx or .pdf timesheets…")
 
-# ---- 2. History ----
+# ---- 2) History (date‐filtered + weekly summaries) ----
 with tabs[1]:
-    import datetime
     st.header("🗃️ Timesheet Upload History")
     st.markdown("Filter by upload date, then see a weekly summary:")
 
-    # 1️⃣ Date picker for upload‑date filtering
-    today = datetime.date.today()
-    thirty_days_ago = today - datetime.timedelta(days=30)
+    # Date range picker (last 30 days default)
+    today = date.today()
     start_date, end_date = st.date_input(
         "Select upload date range",
-        value=(thirty_days_ago, today),
-        min_value=datetime.date(2020, 1, 1),
+        value=(today - timedelta(days=30), today),
+        min_value=date(2020, 1, 1),
         max_value=today
     )
 
-    # 2️⃣ Fetch all history rows
-    query = """
-        SELECT
-            name,
-            matched_as,
-            ratio,
-            client,
-            site_address,
-            department,
-            weekday_hours,
-            saturday_hours,
-            sunday_hours,
-            rate AS rate,
-            date_range,
-            extracted_on,
-            source_file,
-            upload_timestamp
+    # Fetch all rows
+    c.execute("""
+        SELECT name, matched_as, ratio, client, site_address, department,
+               weekday_hours, saturday_hours, sunday_hours, rate AS rate,
+               date_range, extracted_on, source_file, upload_timestamp
         FROM timesheet_entries
         ORDER BY upload_timestamp DESC
-    """
-    c.execute(query)
-    history_rows = c.fetchall()
-    history_df = pd.DataFrame(history_rows, columns=[
-        "Name", "Matched As", "Ratio", "Client", "Site Address", "Department",
-        "Weekday Hours", "Saturday Hours", "Sunday Hours", "Rate (£)",
-        "Date Range", "Extracted On", "Source File", "Upload Timestamp"
-    ])
+    """)
+    rows = c.fetchall()
+    cols = [
+        "Name","Matched As","Ratio","Client","Site Address","Department",
+        "Weekday Hours","Saturday Hours","Sunday Hours","Rate (£)",
+        "Date Range","Extracted On","Source File","Upload Timestamp"
+    ]
+    df = pd.DataFrame(rows, columns=cols)
+    df["Upload Timestamp"] = pd.to_datetime(df["Upload Timestamp"]).dt.date
 
-    # 3️⃣ Filter by the picked date range
-    history_df["Upload Timestamp"] = pd.to_datetime(history_df["Upload Timestamp"]).dt.date
-    mask = (
-        (history_df["Upload Timestamp"] >= start_date)
-        & (history_df["Upload Timestamp"] <= end_date)
-    )
-    filtered = history_df.loc[mask].copy()
+    # Apply date filter
+    mask = (df["Upload Timestamp"] >= start_date) & (df["Upload Timestamp"] <= end_date)
+    filtered = df.loc[mask].copy()
 
     if filtered.empty:
-        st.info("No entries in this date range.")
+        st.info("No entries found in that date range.")
     else:
-        # 4️⃣ Compute pay per row
+        # Compute pay per entry
         filtered["Pay"] = (
             filtered["Weekday Hours"]
             + filtered["Saturday Hours"]
             + filtered["Sunday Hours"]
         ) * filtered["Rate (£)"]
 
-        # 5️⃣ Group into weekly summaries
+        # Group by week
         summary = (
             filtered
             .groupby("Date Range")
             .agg(
-                Entries=("Name", "count"),
-                Weekday_Hours=("Weekday Hours", "sum"),
-                Sat_Hours=("Saturday Hours", "sum"),
-                Sun_Hours=("Sunday Hours", "sum"),
-                Total_Pay=("Pay", "sum")
+                Entries=("Name","count"),
+                Weekday_Hours=("Weekday Hours","sum"),
+                Sat_Hours=("Saturday Hours","sum"),
+                Sun_Hours=("Sunday Hours","sum"),
+                Total_Pay=("Pay","sum")
             )
             .reset_index()
             .sort_values("Date Range", ascending=False)
         )
+
         st.markdown("### 📅 Weekly Summary")
         st.dataframe(summary, use_container_width=True)
 
-        # 6️⃣ Raw‑data expander
-        with st.expander(f"Show raw entries ({len(filtered)}) rows"):
+        with st.expander(f"Show raw entries ({len(filtered)})"):
             st.dataframe(filtered.drop(columns=["Pay"]), use_container_width=True)
 
-# ---- 3. Dashboard ----
+# ---- 3) Dashboard ----
 with tabs[2]:
     st.header("📊 Dashboard")
-    st.markdown("Aggregate stats for all stored timesheets.")
-    # … your existing dashboard logic …
+    st.markdown("Aggregate stats & charts for all stored timesheets.")
+    # … your existing dashboard code …
 
-# ---- 4. Settings ----
+# ---- 4) Settings ----
 with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - Click **Reload Pay Rates** in the sidebar to update rates from your Excel.
-    - Only exact matches (case and accent-insensitive) are used for rates.
-    - Any unmatched name uses the default rate (£15/hr) and is highlighted in red.
-    - For support or feature requests, contact your dev team!
+    - Reload custom rates via the sidebar uploader.  
+    - Missing pay_rates.xlsx → everyone defaults to £15/hr.  
+    - For feature requests, reach out to your dev team.
     """)
+
