@@ -1,18 +1,15 @@
 import os
 import re
 import unicodedata
+import zipfile
 from pathlib import Path
 from io import BytesIO
 from datetime import datetime, date, timedelta
 
 import streamlit as st
 import pandas as pd
-
-# For DOCX/PDF parsing
 import docx
 import pdfplumber
-
-# For reading rate spreadsheets
 from openpyxl import load_workbook
 
 # ==== DB Connection (Postgres on Render, SQLite locally) ====
@@ -51,7 +48,6 @@ CREATE TABLE IF NOT EXISTS timesheet_entries (
 conn.commit()
 
 # ==== Helpers ====
-
 def normalize_name(name: str) -> str:
     """Strip accents & non‑letters, lowercase."""
     nfkd = unicodedata.normalize("NFKD", name)
@@ -68,7 +64,6 @@ def load_rate_database(source):
     for sheet in wb.sheetnames:
         df_raw = pd.read_excel(source, sheet_name=sheet, header=None)
         header_row = None
-        # Find where "Name" and "Pay Rate" sit
         for idx, val in enumerate(df_raw.iloc[:, 0]):
             if isinstance(val, str) and val.strip().lower() == "name":
                 if isinstance(df_raw.iat[idx, 1], str) and df_raw.iat[idx, 1].strip().lower() == "pay rate":
@@ -124,7 +119,7 @@ def calculate_pay(name: str, daily_data: list[dict]) -> dict:
     # … your code …
     return {}
 
-# ==== Sidebar Rate‑Sheet Uploader ====
+# ==== Sidebar: Multi‑sheet Rate‑Loader ====
 RATE_FILE_PATH = "pay_rates.xlsx"
 rate_uploaders = st.sidebar.file_uploader(
     "➕ Upload one or more pay‑rate XLSX files",
@@ -142,12 +137,11 @@ def merge_rate_file(source):
     normalized_rates.update(nr)
     norm_to_raw.update(nt)
 
-# 1) If user uploaded sheets, merge them in order:
+# 1) Merge any uploaded rate sheets
 if rate_uploaders:
     for up in rate_uploaders:
         merge_rate_file(up)
-    st.sidebar.success(f"Merged {len(rate_uploaders)} custom rate sheet(s).")
-
+    st.sidebar.success(f"Merged {len(rate_uploaders)} rate sheet(s).")
 # 2) Else try local fallback
 elif Path(RATE_FILE_PATH).exists():
     try:
@@ -155,18 +149,17 @@ elif Path(RATE_FILE_PATH).exists():
         st.sidebar.info(f"Loaded local `{RATE_FILE_PATH}`.")
     except Exception as e:
         st.sidebar.error(f"Error loading `{RATE_FILE_PATH}`: {e}")
-
-# 3) If still empty, warn and default
+# 3) Warn if still empty
 if not normalized_rates:
     st.sidebar.warning(
-        "No pay‑rate data found; everyone will default to £15/hr. "
+        "No pay‑rate data found; defaulting to £15/hr for everyone. "
         "Upload XLSX(s) above to enable custom rates."
     )
 
-# ==== Sidebar: Timesheet upload instructions ====
+# ==== Sidebar: Timesheet Upload UI ====
 st.sidebar.header("Upload Timesheets")
 st.sidebar.markdown("""
-1. Upload **.docx** or **.pdf**  
+1. Upload **.docx**, **.pdf** or **.zip**  
 2. Confirm name‑matches (expand Debug)  
 3. Export Excel with formulas  
 """)
@@ -180,11 +173,65 @@ tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
 # ---- 1) Upload & Review ----
 with tabs[0]:
     st.header("📤 Upload & Review Timesheets")
-    if uploaded_files:
-        st.success(f"Processing {len(uploaded_files)} file(s)…")
-        # … insert your parsing, DB‐save & export logic …
+
+    if not uploaded_files:
+        st.info("Waiting for you to upload .docx, .pdf or .zip of timesheets…")
     else:
-        st.info("Waiting for you to upload .docx/.pdf timesheets…")
+        total = len(uploaded_files)
+        progress = st.progress(0)
+        all_records = []
+
+        with st.spinner(f"Processing {total} file(s)…"):
+            for idx, uf in enumerate(uploaded_files):
+                st.write(f"➡️ Handling **{uf.name}** ({idx+1}/{total})")
+                lower = uf.name.lower()
+
+                # ZIP support
+                if lower.endswith(".zip"):
+                    try:
+                        z = zipfile.ZipFile(uf)
+                        members = [f for f in z.namelist() if f.lower().endswith((".docx", ".pdf"))]
+                        if not members:
+                            st.warning(f"❗ {uf.name} contains no .docx/.pdf files.")
+                        for member in members:
+                            st.write(f" • Extracting `{member}`")
+                            data = z.read(member)
+                            buff = BytesIO(data)
+                            buff.name = member
+                            if member.lower().endswith(".docx"):
+                                recs = extract_from_docx(buff)
+                            else:
+                                recs = extract_from_pdf(buff)
+                            st.write(f"   → Got {len(recs)} records")
+                            all_records.extend(recs)
+                    except zipfile.BadZipFile:
+                        st.error(f"❌ {uf.name} is not a valid ZIP.")
+                # DOCX
+                elif lower.endswith(".docx"):
+                    st.write(" • Parsing DOCX…")
+                    recs = extract_from_docx(uf)
+                    st.write(f"   → Got {len(recs)} records")
+                    all_records.extend(recs)
+                # PDF
+                elif lower.endswith(".pdf"):
+                    st.write(" • Parsing PDF…")
+                    recs = extract_from_pdf(uf)
+                    st.write(f"   → Got {len(recs)} records")
+                    all_records.extend(recs)
+                else:
+                    st.warning(f"Unsupported file type: {uf.name}")
+
+                progress.progress((idx + 1) / total)
+
+        # Final result
+        if all_records:
+            st.success(f"✅ Finished! Total records extracted: {len(all_records)}")
+            df = pd.DataFrame(all_records)
+            with st.expander("🔍 Debug: Raw extraction DataFrame"):
+                st.dataframe(df, use_container_width=True)
+            # … your calculate_pay(), DB insert, and Excel‑export logic …
+        else:
+            st.error("No valid timesheet records were extracted.")
 
 # ---- 2) History (Date‑filter + Weekly Summary) ----
 with tabs[1]:
@@ -195,7 +242,7 @@ with tabs[1]:
     start_date, end_date = st.date_input(
         "Select upload date range",
         value=(today - timedelta(days=30), today),
-        min_value=date(2020, 1, 1),
+        min_value=date(2020,1,1),
         max_value=today
     )
 
@@ -222,9 +269,9 @@ with tabs[1]:
         st.info("No entries found in that date range.")
     else:
         filtered["Pay"] = (
-            filtered["Weekday Hours"] +
-            filtered["Saturday Hours"] +
-            filtered["Sunday Hours"]
+            filtered["Weekday Hours"]
+            + filtered["Saturday Hours"]
+            + filtered["Sunday Hours"]
         ) * filtered["Rate (£)"]
 
         summary = (
@@ -257,8 +304,7 @@ with tabs[2]:
 with tabs[3]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - Drag‑n‑drop _any_ number of rate spreadsheets in the sidebar.  
-    - Later uploads overwrite earlier rates on name collisions.  
+    - Drag‑n‑drop any number of rate spreadsheets; later uploads overwrite earlier rates.  
     - Missing rate data → everyone defaults to £15/hr.  
     - For feature requests or help, ping your dev team!
     """)
