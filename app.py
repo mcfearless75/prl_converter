@@ -13,7 +13,8 @@ import pdfplumber
 from openpyxl import load_workbook
 
 # ==== DB Connection (Postgres on Render, SQLite locally) ====
-if "DATABASE_URL" in os.environ:
+IS_PG = "DATABASE_URL" in os.environ
+if IS_PG:
     import psycopg2
     from urllib.parse import urlparse
     url = urlparse(os.environ["DATABASE_URL"])
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS timesheet_entries (
     date_range TEXT,
     extracted_on TEXT,
     source_file TEXT,
-    upload_timestamp TIMESTAMP
+    upload_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 conn.commit()
@@ -93,10 +94,10 @@ uploads = st.sidebar.file_uploader(
 
 custom_rates, normalized_rates, norm_to_raw = {}, {}, {}
 def _merge(src):
-    c, n, t = load_rate_database(src)
-    custom_rates.update(c)
-    normalized_rates.update(n)
-    norm_to_raw.update(t)
+    cr, nr, nt = load_rate_database(src)
+    custom_rates.update(cr)
+    normalized_rates.update(nr)
+    norm_to_raw.update(nt)
 
 if uploads:
     for f in uploads:
@@ -234,8 +235,7 @@ with tabs[0]:
                         for m in members:
                             st.write(f" • Extracting `{m}`")
                             data = z.read(m)
-                            buf = BytesIO(data)
-                            buf.name = m
+                            buf = BytesIO(data); buf.name = m
                             recs = (
                                 extract_from_docx(buf)
                                 if m.lower().endswith(".docx")
@@ -285,7 +285,39 @@ with tabs[0]:
             )
             # --------------------------------
 
-            # Optional: insert into DB and your original export logic…
+            # --- PERSIST TO DATABASE ---
+            # Choose placeholder style
+            if IS_PG:
+                ph = ",".join(["%s"] * 13)
+            else:
+                ph = ",".join(["?"] * 13)
+
+            insert_sql = f"""
+                INSERT INTO timesheet_entries
+                  (name, matched_as, ratio, client, site_address, department,
+                   weekday_hours, saturday_hours, sunday_hours, rate,
+                   date_range, extracted_on, source_file)
+                VALUES ({ph})
+            """
+
+            for rec in summaries:
+                params = [
+                    rec["name"],
+                    rec["matched_as"],
+                    rec["ratio"],
+                    rec["client"],
+                    rec["site_address"],
+                    rec["department"],
+                    rec["weekday_hours"],
+                    rec["saturday_hours"],
+                    rec["sunday_hours"],
+                    rec["rate"],
+                    rec["date_range"],
+                    rec["extracted_on"],
+                    uf.name,  # the original filename or ZIP member
+                ]
+                c.execute(insert_sql, params)
+            conn.commit()
 
 # ---- 2) History (date‑filter + weekly summary) ----
 with tabs[1]:
@@ -296,7 +328,7 @@ with tabs[1]:
     start_date, end_date = st.date_input(
         "Select upload date range",
         value=(today - timedelta(days=30), today),
-        min_value=date(2020,1,1), max_value=today
+        min_value=date(2020, 1, 1), max_value=today
     )
 
     c.execute("""
@@ -339,7 +371,8 @@ with tabs[1]:
                     Sun_Hours=("Sunday Hours","sum"),
                     Total_Pay=("Pay","sum")
                 )
-                .reset_index().sort_values("Date Range", ascending=False)
+                .reset_index()\
+                .sort_values("Date Range", ascending=False)
         )
 
         st.markdown("### 📅 Weekly Summary")
