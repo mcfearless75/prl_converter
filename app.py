@@ -94,19 +94,16 @@ def _merge(src):
     normalized_rates.update(n)
     norm_to_raw.update(t)
 
-# If user dropped in files, merge those:
 if uploads:
     for f in uploads:
         _merge(f)
     st.sidebar.success(f"Merged {len(uploads)} rate sheet(s).")
-# Else fallback to disk file:
 elif Path(RATE_FILE).exists():
     try:
         _merge(RATE_FILE)
         st.sidebar.info(f"Loaded local `{RATE_FILE}`.")
     except Exception as e:
         st.sidebar.error(f"Error loading `{RATE_FILE}`: {e}")
-# If still nothing:
 if not normalized_rates:
     st.sidebar.warning(
         "No pay‑rate data found; everyone will default to £15/hr. "
@@ -125,13 +122,9 @@ def extract_from_docx(file) -> list[dict]:
     if not doc.tables:
         return []
     tbl = doc.tables[0]
-
-    # 1) Pull Client, Name, Site Address
     header = tbl.rows[0].cells[0].text.split("\n")
     header = [h.strip() for h in header if h.strip()]
-    client = None
-    name   = None
-    site   = None
+    client = name = site = None
     for i, line in enumerate(header):
         low = line.lower()
         if low.startswith("client"):
@@ -139,12 +132,8 @@ def extract_from_docx(file) -> list[dict]:
             if i+1 < len(header):
                 name = header[i+1].strip()
         if low.startswith("site address"):
-            # after tab comes address
             parts = line.split("\t",1)
             site = parts[1].strip() if len(parts)>1 else None
-
-    # 2) Find the row with "Date" header
-    #    It's row index 2 in your sheet; but let's detect it
     header_row = None
     for idx, row in enumerate(tbl.rows):
         if row.cells[0].text.strip().lower()=="date":
@@ -152,10 +141,8 @@ def extract_from_docx(file) -> list[dict]:
             break
     if header_row is None:
         return []
-
-    # 3) Loop the next 7 rows, parse hours
     date_re = re.compile(r"\d{2}\.\d{2}\.\d{4}")
-    weekday= saturday= sunday = 0.0
+    weekday = saturday = sunday = 0.0
     dates_list = []
     for row in tbl.rows[header_row+1:]:
         dt = row.cells[0].text.strip()
@@ -163,23 +150,18 @@ def extract_from_docx(file) -> list[dict]:
             continue
         dates_list.append(dt)
         day = row.cells[1].text.strip().lower()
-        hrs_text = row.cells[4].text.strip()
         try:
-            hrs = float(hrs_text)
+            hrs = float(row.cells[4].text.strip())
         except:
             hrs = 0.0
-
-        if day in ("saturday",):
+        if day=="saturday":
             saturday += hrs
-        elif day in ("sunday",):
+        elif day=="sunday":
             sunday += hrs
         else:
             weekday += hrs
-
     if not dates_list:
         return []
-
-    # 4) Build a single summary record
     start, end = min(dates_list), max(dates_list)
     drange = f"{start}–{end}"
     matched, rate, ratio = lookup_match(name or "")
@@ -189,7 +171,7 @@ def extract_from_docx(file) -> list[dict]:
         "ratio": ratio,
         "client": client or "",
         "site_address": site or "",
-        "department": "",            # you can tweak if you have a Dept field
+        "department": "",
         "weekday_hours": weekday,
         "saturday_hours": saturday,
         "sunday_hours": sunday,
@@ -199,7 +181,6 @@ def extract_from_docx(file) -> list[dict]:
     }]
 
 def extract_from_pdf(file) -> list[dict]:
-    # TODO: implement PDF‐based parsing with pdfplumber
     return []
 
 # ==== Sidebar: Timesheet uploader ====
@@ -230,10 +211,8 @@ with tabs[0]:
         with st.spinner(f"Processing {total} file(s)…"):
             for i, uf in enumerate(uploaded):
                 st.write(f"➡️ Handling **{uf.name}** ({i+1}/{total})")
-                name = uf.name.lower()
-
-                # ZIP
-                if name.endswith(".zip"):
+                lower = uf.name.lower()
+                if lower.endswith(".zip"):
                     try:
                         z = zipfile.ZipFile(uf)
                         members = [f for f in z.namelist()
@@ -243,8 +222,7 @@ with tabs[0]:
                         for m in members:
                             st.write(f" • Extracting `{m}`")
                             data = z.read(m)
-                            buf = BytesIO(data)
-                            buf.name = m
+                            buf = BytesIO(data); buf.name = m
                             recs = (extract_from_docx(buf)
                                     if m.lower().endswith(".docx")
                                     else extract_from_pdf(buf))
@@ -252,16 +230,12 @@ with tabs[0]:
                             summaries += recs
                     except zipfile.BadZipFile:
                         st.error(f"{uf.name} is not a valid ZIP.")
-
-                # DOCX
-                elif name.endswith(".docx"):
+                elif lower.endswith(".docx"):
                     st.write(" • Parsing DOCX…")
                     recs = extract_from_docx(uf)
                     st.write(f"   → Got {len(recs)} summary record(s)")
                     summaries += recs
-
-                # PDF
-                elif name.endswith(".pdf"):
+                elif lower.endswith(".pdf"):
                     st.write(" • Parsing PDF…")
                     recs = extract_from_pdf(uf)
                     st.write(f"   → Got {len(recs)} summary record(s)")
@@ -279,19 +253,28 @@ with tabs[0]:
             with st.expander("🔍 Debug: Raw summaries"):
                 st.dataframe(df, use_container_width=True)
 
-            # --- Now you can loop `summaries` to insert into your DB ---
+            # --- EXCEL EXPORT SNIPPET ----
+            towrite = BytesIO()
+            with pd.ExcelWriter(towrite, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Summaries")
+                writer.save()
+            towrite.seek(0)
+
+            st.download_button(
+                label="📥 Download Timesheet Summary (Excel)",
+                data=towrite,
+                file_name=f"timesheet_summary_{date.today().isoformat()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            # --------------------------------
+
+            # --- (Optional) Insert into DB and export your formulas as before ---
             # for rec in summaries:
             #     c.execute(
-            #         "INSERT INTO timesheet_entries (name, matched_as, ratio, client, site_address, department, weekday_hours, saturday_hours, sunday_hours, rate, date_range, extracted_on, source_file, upload_timestamp) "
-            #         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())",
-            #         (rec["name"], rec["matched_as"], rec["ratio"], rec["client"],
-            #          rec["site_address"], rec["department"], rec["weekday_hours"],
-            #          rec["saturday_hours"], rec["sunday_hours"], rec["rate"],
-            #          rec["date_range"], rec["extracted_on"], uf.name)
+            #         "INSERT INTO timesheet_entries (...) VALUES (...)",
+            #         (...)
             #     )
             # conn.commit()
-            #
-            # …then your Excel‑export logic…
 
 # ---- 2) History (date‑filter + weekly summary) ----
 with tabs[1]:
