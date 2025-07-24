@@ -59,9 +59,13 @@ def load_rate_database(source):
     for sheet in wb.sheetnames:
         df0 = pd.read_excel(source, sheet_name=sheet, header=None)
         header_row = None
-        for i, v in enumerate(df0.iloc[:,0]):
-            if isinstance(v, str) and v.strip().lower() == "name" \
-               and isinstance(df0.iat[i,1], str) and df0.iat[i,1].strip().lower()=="pay rate":
+        for i, v in enumerate(df0.iloc[:, 0]):
+            if (
+                isinstance(v, str)
+                and v.strip().lower() == "name"
+                and isinstance(df0.iat[i, 1], str)
+                and df0.iat[i, 1].strip().lower() == "pay rate"
+            ):
                 header_row = i
                 break
         if header_row is None:
@@ -69,7 +73,7 @@ def load_rate_database(source):
         df = pd.read_excel(source, sheet_name=sheet, header=header_row)
         if "Name" not in df or "Pay Rate" not in df:
             continue
-        df = df[["Name","Pay Rate"]].dropna()
+        df = df[["Name", "Pay Rate"]].dropna()
         df["Pay Rate"] = pd.to_numeric(df["Pay Rate"], errors="coerce")
         for _, r in df.iterrows():
             raw = str(r["Name"]).strip()
@@ -128,15 +132,15 @@ def extract_from_docx(file) -> list[dict]:
     for i, line in enumerate(header):
         low = line.lower()
         if low.startswith("client"):
-            client = line.split(None,1)[1].strip()
-            if i+1 < len(header):
-                name = header[i+1].strip()
+            client = line.split(None, 1)[1].strip()
+            if i + 1 < len(header):
+                name = header[i + 1].strip()
         if low.startswith("site address"):
-            parts = line.split("\t",1)
-            site = parts[1].strip() if len(parts)>1 else None
+            parts = line.split("\t", 1)
+            site = parts[1].strip() if len(parts) > 1 else None
     header_row = None
     for idx, row in enumerate(tbl.rows):
-        if row.cells[0].text.strip().lower()=="date":
+        if row.cells[0].text.strip().lower() == "date":
             header_row = idx
             break
     if header_row is None:
@@ -144,7 +148,7 @@ def extract_from_docx(file) -> list[dict]:
     date_re = re.compile(r"\d{2}\.\d{2}\.\d{4}")
     weekday = saturday = sunday = 0.0
     dates_list = []
-    for row in tbl.rows[header_row+1:]:
+    for row in tbl.rows[header_row + 1 :]:
         dt = row.cells[0].text.strip()
         if not date_re.match(dt):
             continue
@@ -154,9 +158,9 @@ def extract_from_docx(file) -> list[dict]:
             hrs = float(row.cells[4].text.strip())
         except:
             hrs = 0.0
-        if day=="saturday":
+        if day == "saturday":
             saturday += hrs
-        elif day=="sunday":
+        elif day == "sunday":
             sunday += hrs
         else:
             weekday += hrs
@@ -165,31 +169,35 @@ def extract_from_docx(file) -> list[dict]:
     start, end = min(dates_list), max(dates_list)
     drange = f"{start}–{end}"
     matched, rate, ratio = lookup_match(name or "")
-    return [{
-        "name": name or "",
-        "matched_as": matched,
-        "ratio": ratio,
-        "client": client or "",
-        "site_address": site or "",
-        "department": "",
-        "weekday_hours": weekday,
-        "saturday_hours": saturday,
-        "sunday_hours": sunday,
-        "rate": rate,
-        "date_range": drange,
-        "extracted_on": datetime.now().isoformat(),
-    }]
+    return [
+        {
+            "name": name or "",
+            "matched_as": matched,
+            "ratio": ratio,
+            "client": client or "",
+            "site_address": site or "",
+            "department": "",
+            "weekday_hours": weekday,
+            "saturday_hours": saturday,
+            "sunday_hours": sunday,
+            "rate": rate,
+            "date_range": drange,
+            "extracted_on": datetime.now().isoformat(),
+        }
+    ]
 
 def extract_from_pdf(file) -> list[dict]:
     return []
 
 # ==== Sidebar: Timesheet uploader ====
 st.sidebar.header("Upload Timesheets")
-st.sidebar.markdown("""
+st.sidebar.markdown(
+    """
 1. Upload **.docx**, **.pdf** or **.zip**  
 2. Confirm name‑matches (expand Debug)  
 3. Export Excel with formulas  
-""")
+"""
+)
 uploaded = st.sidebar.file_uploader(
     "Choose timesheet file(s)", accept_multiple_files=True
 )
@@ -215,35 +223,47 @@ with tabs[0]:
                 if lower.endswith(".zip"):
                     try:
                         z = zipfile.ZipFile(uf)
-                        members = [f for f in z.namelist()
-                                   if f.lower().endswith((".docx", ".pdf"))]
+                        members = [
+                            f
+                            for f in z.namelist()
+                            if f.lower().endswith((".docx", ".pdf"))
+                        ]
                         if not members:
                             st.warning(f"{uf.name} had no .docx/.pdf inside.")
                         for m in members:
                             st.write(f" • Extracting `{m}`")
                             data = z.read(m)
-                            buf = BytesIO(data); buf.name = m
-                            recs = (extract_from_docx(buf)
-                                    if m.lower().endswith(".docx")
-                                    else extract_from_pdf(buf))
-                            st.write(f"   → Got {len(recs)} summary record(s)")
+                            buf = BytesIO(data)
+                            buf.name = m
+                            recs = (
+                                extract_from_docx(buf)
+                                if m.lower().endswith(".docx")
+                                else extract_from_pdf(buf)
+                            )
+                            st.write(
+                                f"   → Got {len(recs)} summary record(s)"
+                            )
                             summaries += recs
                     except zipfile.BadZipFile:
                         st.error(f"{uf.name} is not a valid ZIP.")
                 elif lower.endswith(".docx"):
                     st.write(" • Parsing DOCX…")
                     recs = extract_from_docx(uf)
-                    st.write(f"   → Got {len(recs)} summary record(s)")
+                    st.write(
+                        f"   → Got {len(recs)} summary record(s}"
+                    )
                     summaries += recs
                 elif lower.endswith(".pdf"):
                     st.write(" • Parsing PDF…")
                     recs = extract_from_pdf(uf)
-                    st.write(f"   → Got {len(recs)} summary record(s)")
+                    st.write(
+                        f"   → Got {len(recs)} summary record(s)"
+                    )
                     summaries += recs
                 else:
                     st.warning(f"Unsupported file: {uf.name}")
 
-                progress.progress((i+1)/total)
+                progress.progress((i + 1) / total)
 
         if not summaries:
             st.error("No valid timesheet records were extracted.")
@@ -257,7 +277,6 @@ with tabs[0]:
             towrite = BytesIO()
             with pd.ExcelWriter(towrite, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Summaries")
-                writer.save()
             towrite.seek(0)
 
             st.download_button(
@@ -268,11 +287,11 @@ with tabs[0]:
             )
             # --------------------------------
 
-            # --- (Optional) Insert into DB and export your formulas as before ---
+            # --- (Optional) Insert into DB and your original export logic ---
             # for rec in summaries:
             #     c.execute(
-            #         "INSERT INTO timesheet_entries (...) VALUES (...)",
-            #         (...)
+            #         "INSERT INTO timesheet_entries (...) VALUES (…) ",
+            #         (…)
             #     )
             # conn.commit()
 
@@ -285,16 +304,19 @@ with tabs[1]:
     start_date, end_date = st.date_input(
         "Select upload date range",
         value=(today - timedelta(days=30), today),
-        min_value=date(2020,1,1), max_value=today
+        min_value=date(2020, 1, 1),
+        max_value=today
     )
 
-    c.execute("""
+    c.execute(
+        """
         SELECT name, matched_as, ratio, client, site_address, department,
                weekday_hours, saturday_hours, sunday_hours, rate AS rate,
                date_range, extracted_on, source_file, upload_timestamp
         FROM timesheet_entries
         ORDER BY upload_timestamp DESC
-    """)
+        """
+    )
     rows = c.fetchall()
     cols = [
         "Name","Matched As","Ratio","Client","Site Address","Department",
@@ -304,13 +326,21 @@ with tabs[1]:
     hist = pd.DataFrame(rows, columns=cols)
     hist["Upload Timestamp"] = pd.to_datetime(hist["Upload Timestamp"]).dt.date
 
-    mask = (hist["Upload Timestamp"] >= start_date) & (hist["Upload Timestamp"] <= end_date)
+    mask = (
+        (hist["Upload Timestamp"] >= start_date)
+        & (hist["Upload Timestamp"] <= end_date)
+    )
     filt = hist.loc[mask]
 
     if filt.empty:
         st.info("No entries found in that date range.")
     else:
-        filt["Pay"] = (filt["Weekday Hours"] + filt["Saturday Hours"] + filt["Sunday Hours"]) * filt["Rate (£)"]
+        filt["Pay"] = (
+            filt["Weekday Hours"]
+            + filt["Saturday Hours"]
+            + filt["Sunday Hours"]
+        ) * filt["Rate (£)"]
+
         summary = (
             filt.groupby("Date Range")
                 .agg(
@@ -320,10 +350,13 @@ with tabs[1]:
                     Sun_Hours=("Sunday Hours","sum"),
                     Total_Pay=("Pay","sum")
                 )
-                .reset_index().sort_values("Date Range", ascending=False)
+                .reset_index()
+                .sort_values("Date Range", ascending=False)
         )
+
         st.markdown("### 📅 Weekly Summary")
         st.dataframe(summary, use_container_width=True)
+
         with st.expander(f"Show raw entries ({len(filt)})"):
             st.dataframe(filt.drop(columns=["Pay"]), use_container_width=True)
 
