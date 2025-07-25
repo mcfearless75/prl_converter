@@ -27,7 +27,7 @@ else:
     conn = sqlite3.connect("timesheets.db", check_same_thread=False)
 c = conn.cursor()
 
-# Add is_paid flag if not exists
+# Schema (adds is_paid if needed)
 c.execute("""
 CREATE TABLE IF NOT EXISTS timesheet_entries (
     id SERIAL PRIMARY KEY,
@@ -64,7 +64,8 @@ def load_rate_database(source):
         header_row = None
         for i, v in enumerate(df0.iloc[:, 0]):
             if (
-                isinstance(v, str) and v.strip().lower() == "name"
+                isinstance(v, str)
+                and v.strip().lower() == "name"
                 and isinstance(df0.iat[i, 1], str)
                 and df0.iat[i, 1].strip().lower() == "pay rate"
             ):
@@ -86,10 +87,10 @@ def load_rate_database(source):
             to_raw[n] = raw
     return custom, normed, to_raw
 
-# ==== Rate‑Loader (multi‑sheet) ====
+# ==== Sidebar: Rate Upload ====
 RATE_FILE = "pay_rates.xlsx"
-uploads = st.sidebar.file_uploader(
-    "➕ Upload one or more pay‑rate XLSX files",
+rate_uploads = st.sidebar.file_uploader(
+    "➕ Upload pay‑rate XLSX(s)",
     type=["xlsx"], accept_multiple_files=True
 )
 custom_rates, normalized_rates, norm_to_raw = {}, {}, {}
@@ -98,11 +99,9 @@ def _merge(src):
     custom_rates.update(cr)
     normalized_rates.update(nr)
     norm_to_raw.update(nt)
-
-if uploads:
-    for f in uploads:
-        _merge(f)
-    st.sidebar.success(f"Merged {len(uploads)} rate sheet(s).")
+if rate_uploads:
+    for f in rate_uploads: _merge(f)
+    st.sidebar.success(f"Merged {len(rate_uploads)} rate sheet(s).")
 elif Path(RATE_FILE).exists():
     try:
         _merge(RATE_FILE)
@@ -121,8 +120,7 @@ def lookup_match(name: str):
 # ==== Extraction Logic ====
 def extract_from_docx(file) -> list[dict]:
     doc = docx.Document(file)
-    if not doc.tables:
-        return []
+    if not doc.tables: return []
     tbl = doc.tables[0]
     hdr = tbl.rows[0].cells[0].text.split("\n")
     hdr = [h.strip() for h in hdr if h.strip()]
@@ -130,55 +128,48 @@ def extract_from_docx(file) -> list[dict]:
     for i, line in enumerate(hdr):
         low = line.lower()
         if low.startswith("client"):
-            client = line.split(None, 1)[1].strip()
-            if i + 1 < len(hdr):
-                name = hdr[i + 1].strip()
+            client = line.split(None,1)[1].strip()
+            if i+1<len(hdr): name=hdr[i+1].strip()
         if low.startswith("site address"):
-            parts = line.split("\t", 1)
-            site = parts[1].strip() if len(parts) > 1 else None
-    header_row = next((i for i, row in enumerate(tbl.rows)
-                       if row.cells[0].text.strip().lower() == "date"), None)
-    if header_row is None:
-        return []
+            parts=line.split("\t",1)
+            site=parts[1].strip() if len(parts)>1 else None
+    header_row = next(
+        (i for i,row in enumerate(tbl.rows)
+         if row.cells[0].text.strip().lower()=="date"),
+        None
+    )
+    if header_row is None: return []
     date_re = re.compile(r"\d{2}\.\d{2}\.\d{4}")
-    wd = sa = su = 0.0
-    dates = []
-    for row in tbl.rows[header_row + 1 :]:
-        dt = row.cells[0].text.strip()
-        if not date_re.match(dt):
-            continue
+    wd=sa=su=0.0; dates=[]
+    for row in tbl.rows[header_row+1:]:
+        dt=row.cells[0].text.strip()
+        if not date_re.match(dt): continue
         dates.append(dt)
-        day = row.cells[1].text.strip().lower()
-        try:
-            hrs = float(row.cells[4].text.strip())
-        except:
-            hrs = 0.0
-        if day == "saturday":
-            sa += hrs
-        elif day == "sunday":
-            su += hrs
-        else:
-            wd += hrs
-    if not dates:
-        return []
-    dr = f"{min(dates)}–{max(dates)}"
+        day=row.cells[1].text.strip().lower()
+        try: hrs=float(row.cells[4].text.strip())
+        except: hrs=0.0
+        if day=="saturday": sa+=hrs
+        elif day=="sunday": su+=hrs
+        else: wd+=hrs
+    if not dates: return []
+    dr=f"{min(dates)}–{max(dates)}"
     matched, rate, ratio = lookup_match(name or "")
     return [{
-        "id": None,
-        "name": name or "",
-        "matched_as": matched,
-        "ratio": ratio,
-        "client": client or "",
-        "site_address": site or "",
-        "department": "",
-        "weekday_hours": wd,
-        "saturday_hours": sa,
-        "sunday_hours": su,
-        "rate": rate,
-        "date_range": dr,
-        "extracted_on": datetime.now().isoformat(),
-        "source_file": None,
-        "is_paid": False
+        "id":None,
+        "name":name or "",
+        "matched_as":matched,
+        "ratio":ratio,
+        "client":client or "",
+        "site_address":site or "",
+        "department":"",
+        "weekday_hours":wd,
+        "saturday_hours":sa,
+        "sunday_hours":su,
+        "rate":rate,
+        "date_range":dr,
+        "extracted_on":datetime.now().isoformat(),
+        "source_file":None,
+        "is_paid":False
     }]
 
 def extract_from_pdf(file) -> list[dict]:
@@ -195,7 +186,7 @@ uploaded = st.sidebar.file_uploader(
     "Choose timesheet file(s)", accept_multiple_files=True
 )
 
-# ==== Main Tabs ====
+# ==== Tabs ====
 tabs = st.tabs([
     "Upload & Review",
     "History",
@@ -219,7 +210,7 @@ with tabs[0]:
             for i, uf in enumerate(uploaded):
                 st.write(f"➡️ {uf.name} ({i+1}/{total})")
                 lower = uf.name.lower()
-                def handle_recs(recs):
+                def handle(recs):
                     for r in recs:
                         r["source_file"] = uf.name
                         summaries.append(r)
@@ -228,29 +219,24 @@ with tabs[0]:
                     try:
                         z = zipfile.ZipFile(uf)
                         members = [m for m in z.namelist()
-                                   if m.lower().endswith((".docx", ".pdf"))]
+                                   if m.lower().endswith((".docx",".pdf"))]
                         if not members:
                             st.warning(f"{uf.name} empty ZIP.")
                         for m in members:
-                            data = z.read(m)
-                            buf = BytesIO(data); buf.name = m
+                            buf=BytesIO(z.read(m)); buf.name=m
                             recs = (extract_from_docx(buf)
                                     if m.lower().endswith(".docx")
                                     else extract_from_pdf(buf))
                             st.write(f" • {m}: {len(recs)} rec(s)")
-                            handle_recs(recs)
+                            handle(recs)
                     except zipfile.BadZipFile:
                         st.error(f"{uf.name} invalid ZIP.")
                 elif lower.endswith(".docx"):
-                    st.write(" • DOCX…")
-                    recs = extract_from_docx(uf)
-                    st.write(f"   → {len(recs)} rec(s)")
-                    handle_recs(recs)
+                    recs=extract_from_docx(uf); handle(recs)
+                    st.write(f" • DOCX: {len(recs)} rec(s)")
                 elif lower.endswith(".pdf"):
-                    st.write(" • PDF…")
-                    recs = extract_from_pdf(uf)
-                    st.write(f"   → {len(recs)} rec(s)")
-                    handle_recs(recs)
+                    recs=extract_from_pdf(uf); handle(recs)
+                    st.write(f" • PDF: {len(recs)} rec(s)")
                 else:
                     st.warning(f"Unsupported: {uf.name}")
 
@@ -263,33 +249,33 @@ with tabs[0]:
             with st.expander("🔍 Raw summaries"):
                 st.dataframe(df.drop(columns=["id"]), use_container_width=True)
 
-            # Detect duplicates
-            existing, new = [], []
+            # Duplicate check
+            existing,new = [],[]
             for r in summaries:
                 if IS_PG:
                     c.execute(
                         "SELECT COUNT(*) FROM timesheet_entries WHERE name=%s AND date_range=%s",
-                        (r["name"], r["date_range"])
+                        (r["name"],r["date_range"])
                     )
                 else:
                     c.execute(
                         "SELECT COUNT(*) FROM timesheet_entries WHERE name=? AND date_range=?",
-                        (r["name"], r["date_range"])
+                        (r["name"],r["date_range"])
                     )
-                (cnt,) = c.fetchone()
+                cnt=c.fetchone()[0]
                 (existing if cnt>0 else new).append(r)
 
             if existing:
-                st.warning("⚠️ Duplicates (skipped):")
+                st.warning("⚠️ Duplicates skipped:")
                 st.dataframe(
-                    pd.DataFrame(existing)[["name", "date_range", "source_file"]],
+                    pd.DataFrame(existing)[["name","date_range","source_file"]],
                     use_container_width=True
                 )
 
-            # Excel export for all
-            buf = BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                df.drop(columns=["id"]).to_excel(w, index=False)
+            # Excel export
+            buf=BytesIO()
+            with pd.ExcelWriter(buf,engine="openpyxl") as w:
+                df.drop(columns=["id"]).to_excel(w,index=False)
             buf.seek(0)
             st.download_button(
                 "📥 Download All Summaries",
@@ -300,23 +286,23 @@ with tabs[0]:
 
             # Persist new
             if new:
-                ph = ",".join("%s" if IS_PG else "?" for _ in range(13))
+                placeholders = ",".join("%s" if IS_PG else "?" for _ in range(13))
                 sql = f"""
                     INSERT INTO timesheet_entries
                       (name,matched_as,ratio,client,site_address,department,
                        weekday_hours,saturday_hours,sunday_hours,rate,
                        date_range,extracted_on,source_file)
-                    VALUES({ph})
+                    VALUES({placeholders})
                 """
                 for r in new:
-                    params = [
-                        r["name"], r["matched_as"], r["ratio"],
-                        r["client"], r["site_address"], r["department"],
-                        r["weekday_hours"], r["saturday_hours"],
-                        r["sunday_hours"], r["rate"],
-                        r["date_range"], r["extracted_on"], r["source_file"]
+                    params=[
+                        r["name"],r["matched_as"],r["ratio"],
+                        r["client"],r["site_address"],r["department"],
+                        r["weekday_hours"],r["saturday_hours"],
+                        r["sunday_hours"],r["rate"],
+                        r["date_range"],r["extracted_on"],r["source_file"]
                     ]
-                    c.execute(sql, params)
+                    c.execute(sql,params)
                 conn.commit()
                 st.success(f"Inserted {len(new)} new rec(s).")
             else:
@@ -325,27 +311,26 @@ with tabs[0]:
 # ---- 2) History ----
 with tabs[1]:
     st.header("🗃️ Upload History")
-    st.markdown("Quick presets or custom range:")
-    presets = ["Last 30 days", "This month", "Last month", "Year to date", "Custom"]
-    choice = st.selectbox("Date range", presets)
-    today = date.today()
-    if choice != "Custom":
-        if choice == "Last 30 days":
-            start, end = today - timedelta(30), today
-        elif choice == "This month":
-            start, end = today.replace(day=1), today
-        elif choice == "Last month":
-            first = today.replace(day=1)
-            last = first - timedelta(1)
-            start, end = last.replace(day=1), last
-        else:  # Year to date
-            start, end = date(today.year, 1, 1), today
-        st.write(f"**{choice}**: {start} → {end}")
+    st.markdown("Presets or custom range:")
+    presets=["Last 30 days","This month","Last month","Year to date","Custom"]
+    choice=st.selectbox("Range",presets)
+    today=date.today()
+    if choice!="Custom":
+        if choice=="Last 30 days":
+            start,end=today-timedelta(30),today
+        elif choice=="This month":
+            start,end=today.replace(day=1),today
+        elif choice=="Last month":
+            first=today.replace(day=1); last=first-timedelta(1)
+            start,end=last.replace(day=1),last
+        else:
+            start,end=date(today.year,1,1),today
+        st.write(f"Showing **{choice}**: {start} → {end}")
     else:
-        start, end = st.date_input(
+        start,end=st.date_input(
             "Custom range",
-            value=(today - timedelta(30), today),
-            min_value=date(2020, 1, 1), max_value=today
+            value=(today-timedelta(30),today),
+            min_value=date(2020,1,1),max_value=today
         )
     c.execute("""
         SELECT id,name,matched_as,ratio,client,site_address,department,
@@ -354,81 +339,76 @@ with tabs[1]:
         FROM timesheet_entries
         ORDER BY upload_timestamp DESC
     """)
-    hist = pd.DataFrame(c.fetchall(), columns=[
-        "id", "Name", "Matched As", "Ratio", "Client", "Site Address",
-        "Department", "Weekday Hours", "Saturday Hours", "Sunday Hours",
-        "Rate (£)", "Date Range", "Extracted On", "Source File",
-        "Upload Timestamp", "Paid?"
+    hist=pd.DataFrame(c.fetchall(),columns=[
+        "id","Name","Matched As","Ratio","Client","Site Address",
+        "Department","Weekday Hours","Saturday Hours","Sunday Hours",
+        "Rate (£)","Date Range","Extracted On","Source File",
+        "Upload Timestamp","Paid?"
     ])
-    hist["Upload Timestamp"] = pd.to_datetime(hist["Upload Timestamp"]).dt.date
-    view = hist[(hist["Upload Timestamp"] >= start) & (hist["Upload Timestamp"] <= end)]
+    hist["Upload Timestamp"]=pd.to_datetime(hist["Upload Timestamp"]).dt.date
+    view=hist[(hist["Upload Timestamp"]>=start)&(hist["Upload Timestamp"]<=end)]
     if view.empty:
         st.info("No entries in this range.")
     else:
-        # summary omitted for brevity
-        st.markdown("### ✅ Bulk Actions")
-        edited = st.data_editor(
-            view,
-            column_config={"id": {"hidden": True}, "Paid?": {"type": "boolean"}},
-            row_selectable="multi", use_container_width=True
-        )
-        sel_ids = edited["id"].tolist()
-        if sel_ids:
-            c1, c2, c3 = st.columns(3)
-            if c1.button("Delete selected"):
-                ph = ",".join("%s" if IS_PG else "?" for _ in sel_ids)
-                c.execute(f"DELETE FROM timesheet_entries WHERE id IN ({ph})", sel_ids)
-                conn.commit()
-                st.success(f"Deleted {len(sel_ids)} record(s).")
-            if c2.button("Export selected"):
-                df_sel = view[view["id"].isin(sel_ids)]
-                buf2 = BytesIO()
-                with pd.ExcelWriter(buf2, engine="openpyxl") as w:
-                    df_sel.to_excel(w, index=False)
-                buf2.seek(0)
-                st.download_button("Download Export", data=buf2,
-                    file_name=f"export_{date.today()}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            if c3.button("Mark paid"):
-                ph = ",".join("%s" if IS_PG else "?" for _ in sel_ids)
-                c.execute(f"UPDATE timesheet_entries SET is_paid=TRUE WHERE id IN ({ph})", sel_ids)
-                conn.commit()
-                st.success(f"Marked {len(sel_ids)} paid.")
+        # Bulk action selector via multiselect
+        labels = view.apply(lambda r: f"{r['id']}: {r['Name']} ({r['Date Range']}) Paid? {r['Paid?']}", axis=1)
+        selected = st.multiselect("Select entries", labels.tolist())
+        sel_ids = [int(s.split(":")[0]) for s in selected]
+
+        c1,c2,c3 = st.columns(3)
+        if sel_ids and c1.button("Delete selected"):
+            ph=",".join("%s" if IS_PG else "?" for _ in sel_ids)
+            c.execute(f"DELETE FROM timesheet_entries WHERE id IN ({ph})", sel_ids)
+            conn.commit()
+            st.success(f"Deleted {len(sel_ids)} record(s).")
+        if sel_ids and c2.button("Export selected"):
+            df_sel=view[view["id"].isin(sel_ids)]
+            buf2=BytesIO()
+            with pd.ExcelWriter(buf2,engine="openpyxl") as w:
+                df_sel.to_excel(w,index=False)
+            buf2.seek(0)
+            st.download_button(
+                "Download Export",data=buf2,
+                file_name=f"export_{date.today()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        if sel_ids and c3.button("Mark paid"):
+            ph=",".join("%s" if IS_PG else "?" for _ in sel_ids)
+            c.execute(f"UPDATE timesheet_entries SET is_paid=TRUE WHERE id IN ({ph})", sel_ids)
+            conn.commit()
+            st.success(f"Marked {len(sel_ids)} paid.")
 
 # ---- 3) Matches ----
 with tabs[2]:
     st.header("🔗 Name → Rate Matches")
-    st.markdown("Inline‑edit matched name or confidence:")
-    c.execute("SELECT DISTINCT name, matched_as, ratio FROM timesheet_entries ORDER BY name")
-    dfm = pd.DataFrame(c.fetchall(), columns=["Timesheet Name", "Matched Rate Name", "Confidence"])
+    st.markdown("Inline edits:")
+    c.execute("SELECT DISTINCT name,matched_as,ratio FROM timesheet_entries ORDER BY name")
+    dfm=pd.DataFrame(c.fetchall(),columns=["Timesheet Name","Matched Rate Name","Confidence"])
     if dfm.empty:
         st.info("No matches yet.")
     else:
         edited = st.data_editor(
             dfm,
             column_config={
-                "Timesheet Name": {"disabled": True},
+                "Timesheet Name": {"disabled":True},
                 "Matched Rate Name": {},
-                "Confidence": {"min_value": 0.0, "max_value": 1.0}
+                "Confidence": {"min_value":0.0,"max_value":1.0}
             },
-            row_selectable=False,
             use_container_width=True
         )
         if st.button("Save match edits"):
-            diffs = edited.merge(dfm, indicator=True, how="outer").query("_merge!='both'")
-            for _, r in diffs.iterrows():
-                name = r["Timesheet Name"]
-                new_match = r["Matched Rate Name"]
-                new_conf = r["Confidence"]
+            diffs=edited.merge(dfm,indicator=True,how="outer").query("_merge!='both'")
+            for _,r in diffs.iterrows():
+                name=r["Timesheet Name"]; nm=r["Matched Rate Name"]; cf=r["Confidence"]
                 if IS_PG:
                     c.execute(
-                        "UPDATE timesheet_entries SET matched_as=%s, ratio=%s WHERE name=%s",
-                        (new_match, new_conf, name)
+                        "UPDATE timesheet_entries SET matched_as=%s,ratio=%s WHERE name=%s",
+                        (nm,cf,name)
                     )
                 else:
                     c.execute(
-                        "UPDATE timesheet_entries SET matched_as=?, ratio=? WHERE name=?",
-                        (new_match, new_conf, name)
+                        "UPDATE timesheet_entries SET matched_as=?,ratio=? WHERE name=?",
+                        (nm,cf,name)
                     )
             conn.commit()
             st.success(f"Updated {len(diffs)} match(es).")
@@ -436,13 +416,15 @@ with tabs[2]:
 # ---- 4) Dashboard ----
 with tabs[3]:
     st.header("📊 Dashboard")
-    st.markdown("…your existing charts here…")
+    st.markdown("… your charts here …")
 
 # ---- 5) Settings ----
 with tabs[4]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - Duplicate prevention, bulk actions, inline edits & custom presets are live.
+    - Bulk actions now via multiselect.  
+    - Inline edits in Matches.  
+    - Custom & preset date ranges in History.
     """)
 
 # ---- 6) BrightPay Export ----
@@ -450,48 +432,46 @@ with tabs[5]:
     st.header("💼 Export to BrightPay")
     st.markdown("Generate the CSV to import into BrightPay.")
 
-    # Load recent history
+    # Load history
     c.execute("""
-        SELECT name, weekday_hours, saturday_hours, sunday_hours, rate, date_range
-        FROM timesheet_entries
-        ORDER BY upload_timestamp DESC
+        SELECT name,weekday_hours,saturday_hours,sunday_hours,rate,date_range,client
+        FROM timesheet_entries ORDER BY upload_timestamp DESC
     """)
-    bp_df = pd.DataFrame(c.fetchall(), columns=["Name", "WD", "Sat", "Sun", "Rate", "Period"])
+    bp_df=pd.DataFrame(c.fetchall(),columns=[
+        "Name","WD","Sat","Sun","Rate","Period","Client"
+    ])
 
-    # Employee ID mapping
-    emp_map = st.file_uploader("🔄 Upload Name→EmployeeID mapping (.xlsx/.csv)", type=["xlsx","csv"])
+    emp_map=st.file_uploader("🔄 Upload Name→EmployeeID mapping",type=["xlsx","csv"])
     if emp_map:
-        emp = pd.read_excel(emp_map) if emp_map.name.endswith("xlsx") else pd.read_csv(emp_map)
-        if "Name" in emp.columns and "Employee ID" in emp.columns:
-            bp_df = bp_df.merge(emp, on="Name", how="left")
-            missing = bp_df[bp_df["Employee ID"].isnull()]["Name"].unique()
+        emp = (pd.read_excel(emp_map)
+               if emp_map.name.lower().endswith("xlsx")
+               else pd.read_csv(emp_map))
+        if {"Name","Employee ID"}.issubset(emp.columns):
+            bp_df=bp_df.merge(emp,on="Name",how="left")
+            missing=bp_df[bp_df["Employee ID"].isna()]["Name"].unique()
             if len(missing):
-                st.warning(f"No Employee ID for: {missing.tolist()}")
+                st.warning(f"No Emp ID for: {missing.tolist()}")
         else:
-            st.error("Mapping file must have 'Name' and 'Employee ID' columns.")
+            st.error("Mapping needs 'Name' & 'Employee ID' cols.")
 
-    # Pay element choice
-    pay_el = st.selectbox("Select Pay Element", ["Standard Hours", "Overtime", "Holiday"])
-
+    pay_el=st.selectbox("Pay Element",["Standard Hours","Overtime","Holiday"])
     if st.button("📥 Generate BrightPay CSV"):
-        out = []
-        for _, row in bp_df.iterrows():
-            start, end = row["Period"].split("–")
-            # weekday
-            if row["WD"] > 0:
+        out=[]
+        for _,row in bp_df.iterrows():
+            start,end=row["Period"].split("–")
+            if row["WD"]>0:
                 out.append({
-                    "Employee ID": row.get("Employee ID", ""),
-                    "Period Start": start,
-                    "Period End": end,
-                    "Pay Element": pay_el,
-                    "Units": row["WD"],
-                    "Rate": row["Rate"],
-                    "Cost Center": row.get("Client", "")
+                    "Employee ID":row.get("Employee ID",""),
+                    "Period Start":start,
+                    "Period End":end,
+                    "Pay Element":pay_el,
+                    "Units":row["WD"],
+                    "Rate":row["Rate"],
+                    "Cost Center":row["Client"]
                 })
-            # optionally Sat/Sun as separate elements…
         if out:
-            csv_buf = StringIO()
-            pd.DataFrame(out).to_csv(csv_buf, index=False)
+            csv_buf=StringIO()
+            pd.DataFrame(out).to_csv(csv_buf,index=False)
             st.download_button(
                 "📂 Download BrightPay CSV",
                 data=csv_buf.getvalue(),
@@ -499,4 +479,4 @@ with tabs[5]:
                 mime="text/csv"
             )
         else:
-            st.info("No hours to export for BrightPay.")
+            st.info("No hours to export.")
