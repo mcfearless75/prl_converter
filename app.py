@@ -204,7 +204,13 @@ uploaded = st.sidebar.file_uploader(
 )
 
 # ==== Main Tabs ====
-tabs = st.tabs(["Upload & Review", "History", "Dashboard", "Settings"])
+tabs = st.tabs([
+    "Upload & Review",
+    "History",
+    "Matches",
+    "Dashboard",
+    "Settings"
+])
 
 # ---- 1) Upload & Review ----
 with tabs[0]:
@@ -226,8 +232,7 @@ with tabs[0]:
                     try:
                         z = zipfile.ZipFile(uf)
                         members = [
-                            f
-                            for f in z.namelist()
+                            f for f in z.namelist()
                             if f.lower().endswith((".docx", ".pdf"))
                         ]
                         if not members:
@@ -286,12 +291,10 @@ with tabs[0]:
             # --------------------------------
 
             # --- PERSIST TO DATABASE ---
-            # Choose placeholder style
             if IS_PG:
-                ph = ",".join(["%s"] * 13)
+                ph = ",".join("%s" for _ in range(13))
             else:
-                ph = ",".join(["?"] * 13)
-
+                ph = ",".join("?" for _ in range(13))
             insert_sql = f"""
                 INSERT INTO timesheet_entries
                   (name, matched_as, ratio, client, site_address, department,
@@ -299,22 +302,13 @@ with tabs[0]:
                    date_range, extracted_on, source_file)
                 VALUES ({ph})
             """
-
             for rec in summaries:
                 params = [
-                    rec["name"],
-                    rec["matched_as"],
-                    rec["ratio"],
-                    rec["client"],
-                    rec["site_address"],
-                    rec["department"],
-                    rec["weekday_hours"],
-                    rec["saturday_hours"],
-                    rec["sunday_hours"],
-                    rec["rate"],
-                    rec["date_range"],
-                    rec["extracted_on"],
-                    uf.name,  # the original filename or ZIP member
+                    rec["name"], rec["matched_as"], rec["ratio"],
+                    rec["client"], rec["site_address"], rec["department"],
+                    rec["weekday_hours"], rec["saturday_hours"],
+                    rec["sunday_hours"], rec["rate"],
+                    rec["date_range"], rec["extracted_on"], uf.name
                 ]
                 c.execute(insert_sql, params)
             conn.commit()
@@ -371,24 +365,44 @@ with tabs[1]:
                     Sun_Hours=("Sunday Hours","sum"),
                     Total_Pay=("Pay","sum")
                 )
-                .reset_index()\
-                .sort_values("Date Range", ascending=False)
+                .reset_index().sort_values("Date Range", ascending=False)
         )
-
         st.markdown("### 📅 Weekly Summary")
         st.dataframe(summary, use_container_width=True)
 
         with st.expander(f"Show raw entries ({len(filt)})"):
             st.dataframe(filt.drop(columns=["Pay"]), use_container_width=True)
 
-# ---- 3) Dashboard ----
+# ---- 3) Matches ----
 with tabs[2]:
+    st.header("🔗 Name → Rate Matches")
+    st.markdown("See how each timesheet name was matched to your pay‑rate list:")
+
+    c.execute("""
+        SELECT DISTINCT name, matched_as, ratio
+        FROM timesheet_entries
+        ORDER BY name
+    """)
+    rows = c.fetchall()
+    df_matches = pd.DataFrame(rows, columns=[
+        "Timesheet Name",
+        "Matched Rate Name",
+        "Confidence (0–1)"
+    ])
+
+    if df_matches.empty:
+        st.info("No entries yet—upload some timesheets first!")
+    else:
+        st.dataframe(df_matches, use_container_width=True)
+
+# ---- 4) Dashboard ----
+with tabs[3]:
     st.header("📊 Dashboard")
     st.markdown("Aggregate stats & charts for all stored timesheets.")
     # … your existing dashboard code …
 
-# ---- 4) Settings & Info ----
-with tabs[3]:
+# ---- 5) Settings & Info ----
+with tabs[4]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
     - Drag‑n‑drop any number of rate spreadsheets; later uploads overwrite earlier rates.  
