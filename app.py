@@ -71,8 +71,7 @@ def load_rate_database(source):
         )
         if header_row is None: continue
         df = pd.read_excel(source, sheet_name=sheet, header=header_row)
-        if "Name" not in df.columns or "Pay Rate" not in df.columns:
-            continue
+        if "Name" not in df.columns or "Pay Rate" not in df.columns: continue
         df = df[["Name","Pay Rate"]].dropna()
         df["Pay Rate"] = pd.to_numeric(df["Pay Rate"], errors="coerce")
         for _,r in df.iterrows():
@@ -185,7 +184,7 @@ uploaded = st.sidebar.file_uploader(
     "Choose timesheet file(s)", accept_multiple_files=True
 )
 
-# ==== Tabs ====
+# ==== Main Tabs ====
 tabs = st.tabs([
     "Upload & Review",
     "History",
@@ -215,7 +214,8 @@ with tabs[0]:
                     z = zipfile.ZipFile(uf)
                     for m in [m for m in z.namelist() if m.lower().endswith((".docx",".pdf"))]:
                         buf = BytesIO(z.read(m)); buf.name=m
-                        recs = extract_from_docx(buf) if m.lower().endswith(".docx") else extract_from_pdf(buf)
+                        recs = (extract_from_docx(buf) if m.lower().endswith(".docx")
+                                else extract_from_pdf(buf))
                         st.write(f" • {m}: {len(recs)} rec(s)")
                         handle(recs)
                 except zipfile.BadZipFile:
@@ -239,9 +239,11 @@ with tabs[0]:
             existing,new = [],[]
             for r in summaries:
                 if IS_PG:
-                    c.execute("SELECT COUNT(*) FROM timesheet_entries WHERE name=%s AND date_range=%s", (r["name"],r["date_range"]))
+                    c.execute("SELECT COUNT(*) FROM timesheet_entries WHERE name=%s AND date_range=%s",
+                              (r["name"],r["date_range"]))
                 else:
-                    c.execute("SELECT COUNT(*) FROM timesheet_entries WHERE name=? AND date_range=?", (r["name"],r["date_range"]))
+                    c.execute("SELECT COUNT(*) FROM timesheet_entries WHERE name=? AND date_range=?",
+                              (r["name"],r["date_range"]))
                 cnt = c.fetchone()[0]
                 (existing if cnt>0 else new).append(r)
 
@@ -323,14 +325,17 @@ with tabs[1]:
     if view.empty:
         st.info("No entries in this range.")
     else:
-        # only include rows with a real id
-        valid = view.dropna(subset=["id"])
+        # only include persisted rows with real IDs
+        valid = view.dropna(subset=["id"]).copy()
         labels = valid.apply(
             lambda r: f"{int(r['id'])}: {r['Name']} ({r['Date Range']}) Paid? {r['Paid?']}",
             axis=1
         )
-        sel = st.multiselect("Select entries", labels.tolist())
-        sel_ids = [int(s.split(":")[0]) for s in sel]
+        # convert to plain Python list
+        label_list = labels.values.tolist()
+
+        selected = st.multiselect("Select entries", label_list)
+        sel_ids = [int(s.split(":")[0]) for s in selected]
 
         c1,c2,c3 = st.columns(3)
         if sel_ids and c1.button("Delete selected"):
@@ -392,9 +397,8 @@ with tabs[3]:
 with tabs[4]:
     st.header("⚙️ Settings & Info")
     st.markdown("""
-    - History multiselect now only shows persisted entries.  
-    - Bulk delete/export/mark‑paid works without “None” errors.  
-    - Inline edits & BrightPay export unchanged.
+    - History multiselect now uses `labels.values.tolist()`.  
+    - No more `None` selections or `tolist()` errors.  
     """)
 
 # ---- 6) BrightPay Export ----
@@ -429,7 +433,7 @@ with tabs[5]:
             ]).merge(emp[["Name","Employee ID"]], on="Name", how="left")
             missing = bp_df[bp_df["Employee ID"].isna()]["Name"].unique()
             if len(missing):
-                st.warning(f"No Emp ID for: {missing.tolist()}")
+                st.warning(f"No Emp ID for: {missing.tolist()}")
         else:
             st.error("Mapping must have 'Name' & 'Employee ID' cols.")
 
@@ -440,13 +444,13 @@ with tabs[5]:
             start,end = row["Period"].split("–")
             if row["WD"]>0:
                 out.append({
-                    "Employee ID":row["Employee ID"],
-                    "Period Start":start,
-                    "Period End":end,
-                    "Pay Element":pay_el,
+                    "Employee ID":row["Employee ID"],
+                    "Period Start":start,
+                    "Period End":end,
+                    "Pay Element":pay_el,
                     "Units":row["WD"],
                     "Rate":row["Rate"],
-                    "Cost Center":row["Client"]
+                    "Cost Center":row["Client"]
                 })
         if out:
             csv_buf = StringIO()
